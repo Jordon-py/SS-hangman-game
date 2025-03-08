@@ -13,7 +13,11 @@ body
   background-color: #1e3a8a;
   padding: 20px;
 }
-
+#page-title {
+  font-family: Elephant, sans-serif;
+  font-size: 5rem;
+  an
+}
 .game-container
 {
   margin: 20px;
