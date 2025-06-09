@@ -1,279 +1,312 @@
-/* -------------User's guess input---------------*/
-const guessedLettersDiv = document.getElementById('guessedLetters');
-const currentWordDiv = document.getElementById('currentWord');
-const submitButton = document.getElementById('submitButton');
-submitButton.addEventListener('click', handleGuess);
-const guessInput = document.getElementById('guessInput');
-guessInput.addEventListener('keypress', (event) => {
-  if (event.key === 'Enter') {
-    handleGuess();
-  }
-});              
+'use strict';
 
-/*
- -----------------Timer Functionality and game start
+// Dragon Ball Z Hangman Game (refactored)
+// --------------------------------------
+
+/**
+ * Game class encapsulates all game logic and DOM interactions.
  */
-const timerDisplay = document.getElementById('timerDisplay');
-const startButton = document.getElementById('startButton');
-const feedbackDiv = document.getElementById('feedback');
+class HangmanGame {
+  constructor(selectors) {
+    const {
+      wordDisplay,
+      guessedDisplay,
+      input,
+      submitBtn,
+      startBtn,
+      resetBtn,
+      timerDisplay,
+      feedback,
+      canvas
+    } = selectors;
 
-startButton.addEventListener('click', () => {
-  startGame();
-  startTimer();
+    // Cache DOM elements
+    this.wordDisplay = document.querySelector(wordDisplay);
+    this.guessedDisplay = document.querySelector(guessedDisplay);
+    this.input = document.querySelector(input);
+    this.submitBtn = document.querySelector(submitBtn);
+    this.startBtn = document.querySelector(startBtn);
+    this.resetBtn = document.querySelector(resetBtn);
+    this.timerDisplay = document.querySelector(timerDisplay);
+    this.feedback = document.querySelector(feedback);
+    this.canvas = document.getElementById(canvas);
+    this.ctx = this.canvas.getContext('2d');
+
+    // Word list
+    this.words = [
+      'kamehameha',
+      'supersaiyan',
+      'dragonball',
+      'frieza',
+      'goku',
+      'vegeta',
+      'saiyan',
+      'cell',
+      'trunks',
+      'gohan',
+      'piccolo',
+      'bulma',
+      'yamcha',
+      'tien',
+      'chi',
+      'nappa',
+      'raditz',
+      'bardock',
+      'gotenks',
+      'gogeta'
+    ];
+
+    // Bind methods
+    this.initialize = this.initialize.bind(this);
+    this.startGame = this.startGame.bind(this);
+    this.startTimer = this.startTimer.bind(this);
+    this.handleGuess = this.handleGuess.bind(this);
+    this.endGame = this.endGame.bind(this);
+
+    // Event listeners
+    this.resetBtn.addEventListener('click', this.initialize);
+    this.startBtn.addEventListener('click', () => {
+      this.startGame();
+      this.startTimer();
+    });
+    this.submitBtn.addEventListener('click', this.handleGuess);
+    this.input.addEventListener('keypress', e => {
+      if (e.key === 'Enter') this.handleGuess();
+    });
+  }
+
+  initialize() {
+    this.isGameOver = false;
+    this.started = false;
+    this.secretWord = '';
+    this.lettersGuessed = [];
+    this.remainingTime = 120;
+    this.wrongGuessCount = 0;
+    clearInterval(this.timerId);
+
+    this.wordDisplay.innerHTML = '';
+    this.guessedDisplay.textContent = 'Guessed Letters: _';
+    this.feedback.textContent = '';
+    this.timerDisplay.textContent = `Time: ${this.remainingTime}s`;
+    this.input.value = '';
+    this.input.disabled = true;
+    this.submitBtn.disabled = true;
+    this.startBtn.disabled = false;
+    this.clearCanvas();
+  }
+
+  startGame() {
+    this.initialize();
+    this.started = true;
+    this.secretWord = this.getSecretWord();
+
+    this.secretWord.split('').forEach((_, i) => {
+      const span = document.createElement('span');
+      span.id = `letter-${i}`;
+      span.classList.add('letter');
+      span.textContent = '_ ';
+      this.wordDisplay.appendChild(span);
+    });
+
+    this.input.disabled = false;
+    this.submitBtn.disabled = false;
+    this.startBtn.disabled = true;
+  }
+
+  getSecretWord() {
+    const idx = Math.floor(Math.random() * this.words.length);
+    return this.words[idx];
+  }
+
+  handleGuess() {
+    if (!this.started || this.isGameOver) return;
+
+    const guessed = this.input.value.toLowerCase();
+    this.input.value = '';
+
+    if (!/^[a-z]$/.test(guessed)) {
+      this.feedback.textContent = 'Please enter a single letter.';
+      return;
+    }
+
+    if (this.lettersGuessed.includes(guessed)) {
+      this.feedback.textContent = 'You already guessed that letter!';
+      return;
+    }
+
+    this.lettersGuessed.push(guessed);
+    this.updateGuessedLetters();
+
+    if (this.secretWord.includes(guessed)) {
+      this.revealLetters(guessed);
+      this.feedback.textContent = `Nice! "${guessed.toUpperCase()}" is in the word.`;
+      if (this.checkWin()) this.endGame(true);
+    } else {
+      this.wrongGuessCount++;
+      this.feedback.textContent = `Sorry, "${guessed.toUpperCase()}" is not in the word.`;
+      this.drawSpaceman(this.wrongGuessCount);
+      if (this.wrongGuessCount >= 6) this.endGame(false);
+    }
+  }
+
+  updateGuessedLetters() {
+    this.guessedDisplay.textContent = `Guessed Letters: ${this.lettersGuessed.join(', ').toUpperCase()}`;
+  }
+
+  revealLetters(letter) {
+    this.secretWord.split('').forEach((char, i) => {
+      if (char === letter) {
+        const span = document.getElementById(`letter-${i}`);
+        span.textContent = `${char.toUpperCase()} `;
+      }
+    });
+  }
+
+  checkWin() {
+    return this.secretWord.split('').every((char, i) => {
+      const span = document.getElementById(`letter-${i}`);
+      return span.textContent.trim() === char.toUpperCase();
+    });
+  }
+
+  startTimer() {
+    if (this.timerId || this.isGameOver) return;
+    this.started = true;
+    this.timerId = setInterval(() => {
+      this.remainingTime--;
+      this.timerDisplay.textContent = `Time: ${this.remainingTime}s`;
+      if (this.remainingTime <= 0) {
+        clearInterval(this.timerId);
+        this.endGame(false);
+      }
+    }, 1000);
+  }
+
+  endGame(won) {
+    this.isGameOver = true;
+    clearInterval(this.timerId);
+    this.input.disabled = true;
+    this.submitBtn.disabled = true;
+    this.startBtn.disabled = false;
+
+    if (won) {
+      this.feedback.textContent = 'Congratulations! You achieved SuperSaiyan status!';
+      alert('Congratulations! You achieved SuperSaiyan status!');
+    } else {
+      this.feedback.textContent = `Game Over! The word was "${this.secretWord.toUpperCase()}".`;
+      alert(`Game Over! The word was "${this.secretWord.toUpperCase()}". Better luck next time!`);
+      this.revealAllLetters();
+    }
+  }
+
+  revealAllLetters() {
+    this.secretWord.split('').forEach((char, i) => {
+      const span = document.getElementById(`letter-${i}`);
+      span.textContent = `${char.toUpperCase()} `;
+    });
+  }
+
+  clearCanvas() {
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+  }
+
+  drawSpaceman(wrong) {
+    this.clearCanvas();
+
+    this.ctx.lineWidth = 3;
+    this.ctx.strokeStyle = 'black';
+    this.ctx.beginPath();
+    this.ctx.moveTo(20, 180);
+    this.ctx.lineTo(180, 180);
+    this.ctx.stroke();
+
+    if (wrong >= 1) {
+      this.ctx.beginPath();
+      this.ctx.moveTo(40, 180);
+      this.ctx.lineTo(40, 40);
+      this.ctx.stroke();
+    }
+
+    if (wrong >= 2) {
+      this.ctx.beginPath();
+      this.ctx.moveTo(40, 40);
+      this.ctx.lineTo(100, 40);
+      this.ctx.stroke();
+    }
+
+    if (wrong >= 3) {
+      this.ctx.beginPath();
+      this.ctx.moveTo(100, 40);
+      this.ctx.lineTo(100, 60);
+      this.ctx.stroke();
+    }
+
+    if (wrong >= 4) {
+      this.ctx.beginPath();
+      this.ctx.arc(100, 70, 10, 0, Math.PI * 2);
+      this.ctx.stroke();
+
+      this.ctx.beginPath();
+      this.ctx.moveTo(90, 65);
+      this.ctx.lineTo(85, 50);
+      this.ctx.moveTo(95, 60);
+      this.ctx.lineTo(90, 45);
+      this.ctx.moveTo(105, 60);
+      this.ctx.lineTo(110, 45);
+      this.ctx.moveTo(110, 65);
+      this.ctx.lineTo(115, 50);
+      this.ctx.stroke();
+    }
+
+    if (wrong >= 5) {
+      this.ctx.beginPath();
+      this.ctx.moveTo(100, 80);
+      this.ctx.lineTo(100, 120);
+      this.ctx.moveTo(100, 90);
+      this.ctx.lineTo(80, 100);
+      this.ctx.moveTo(100, 90);
+      this.ctx.lineTo(120, 100);
+      this.ctx.stroke();
+    }
+
+    if (wrong >= 6) {
+      this.ctx.beginPath();
+      this.ctx.moveTo(100, 120);
+      this.ctx.lineTo(85, 150);
+      this.ctx.moveTo(100, 120);
+      this.ctx.lineTo(115, 150);
+      this.ctx.stroke();
+
+      this.ctx.strokeStyle = 'gold';
+      this.ctx.beginPath();
+      for (let i = 0; i < 8; i++) {
+        const angle = (i * Math.PI) / 4;
+        const x1 = 100 + 25 * Math.cos(angle);
+        const y1 = 100 + 25 * Math.sin(angle);
+        const x2 = 100 + 35 * Math.cos(angle);
+        const y2 = 100 + 35 * Math.sin(angle);
+        this.ctx.moveTo(x1, y1);
+        this.ctx.lineTo(x2, y2);
+      }
+      this.ctx.stroke();
+    }
+  }
+}
+
+// Initialize when DOM is ready
+window.addEventListener('DOMContentLoaded', () => {
+  const game = new HangmanGame({
+    wordDisplay: '#currentWord',
+    guessedDisplay: '#guessedLetters',
+    input: '#guessInput',
+    submitBtn: '#submitButton',
+    startBtn: '#startButton',
+    resetBtn: '#resetButton',
+    timerDisplay: '#timerDisplay',
+    feedback: '#feedback',
+    canvas: 'spacemanCanvas'
+  });
+
+  game.initialize();
 });
-  
-const resetButton = document.getElementById('resetButton');
-resetButton.addEventListener('click', initializeGame);
 
-const spacemanCanvas = document.getElementById('spacemanCanvas');
-const ctx = spacemanCanvas.getContext('2d');
-
-const dbzWordList = ["kamehameha","supersaiyan","dragonball","frieza","goku","vegeta","saiyan","cell","trunks",
-  "gohan","piccolo","bulma","yamcha","tien","chi","nappa","raditz","bardock","gotenks","gogeta"
-];
-
-/*---------- Variables (state) ---------*/
-
-let lettersGuessed = [];
-let secretWord = '';
-let remainingTime = 180;
-let timeInterval = null;
-let isGameOver = false; // Boolean flag to track game state
-let wrongGuessCount = 0;
-let startGameFlag = false;
-
-/*-------------- Functions -------------*/
-
-function initializeGame() {
-  isGameOver = false;
-  startGameFlag = false;
-  secretWord = '';
-  lettersGuessed = [];
-  remainingTime = 120;
-  wrongGuessCount = 0;
-  clearInterval(timeInterval);
-  
-  currentWordDiv.innerHTML = '';
-  guessedLettersDiv.textContent = 'Guessed Letters: _';
-  feedbackDiv.textContent = '';
-  clearCanvas();
-  timerDisplay.textContent = `Time: ${remainingTime}s`;
-}
-
-function startGame() {
-  initializeGame();
-  secretWord = getSecretWord();
-  console.log(`secretWord: ${secretWord}`);
-
-  // Display the secret word as underscores
-  secretWord.split('').forEach((letter, i) => {
-    let letterSpan = document.createElement('span');
-    letterSpan.setAttribute('id', `letter-${i}`);
-    letterSpan.classList.add('letter');
-    letterSpan.textContent = '_ ';
-    currentWordDiv.appendChild(letterSpan);
-  });
-}
-
-// SECRET WORD ---------------------
-
-function getSecretWord() {          
-  let randomIndex = Math.floor(Math.random() * dbzWordList.length);
-  let selectedWord = dbzWordList[randomIndex].toLowerCase();
-  return selectedWord;
-}
-
-// ------ USER GUESS -------------------------
-
-function handleGuess() {
-  if (isGameOver || !startGameFlag) return; // Prevent actions if the game has ended or hasn't started
-  
-  let guessedLetter = guessInput.value.toLowerCase();
-  guessInput.value = ''; // Clear input field
-  
-  if (!guessedLetter.match(/[a-z]/i) || guessedLetter.length !== 1) {
-    feedbackDiv.textContent = 'Please enter a single letter.';
-    return;
-  }
-  
-  if (lettersGuessed.includes(guessedLetter)) {
-    feedbackDiv.textContent = 'You already guessed that letter!';
-    return;
-  }
-
-  lettersGuessed.push(guessedLetter);
-  updateGuessedLetters();
-
-  if (secretWord.includes(guessedLetter)) {
-    revealLetters(guessedLetter);
-    feedbackDiv.textContent = `Nice! "${guessedLetter.toUpperCase()}" is in the word.`;
-    if (checkWinCondition()) {
-      endGame(true);
-    }
-  } else {
-    wrongGuessCount++;
-    feedbackDiv.textContent = `Sorry, "${guessedLetter.toUpperCase()}" is not in the word.`;
-    drawSpaceman(wrongGuessCount);
-    if (wrongGuessCount >= 6)
-      endGame(false);
-    }
-};
-
-function updateGuessedLetters() {
-  guessedLettersDiv.textContent = `Guessed Letters: ${lettersGuessed.join(', ').toUpperCase()}`;
-}
-
-function revealLetters(letter) {
-  secretWord.split('').forEach((char, i) => {
-    if (char === letter) {
-      let letterSpan = document.getElementById(`letter-${i}`);
-      letterSpan.textContent = `${char.toUpperCase()} `;
-    }
-  });
-}
-
-function checkWinCondition() {
-  return secretWord.split('').every((letter, i) => {
-    let letterSpan = document.getElementById(`letter-${i}`);
-    return letterSpan.textContent.trim() === letter.toUpperCase();
-  });
-}
-
-// Define endGame as a separate function outside handleGuess
-function endGame(won) {
-  isGameOver = true;
-  clearInterval(timeInterval);
-  if (won) {
-    feedbackDiv.textContent = 'Congratulations! You achieved SuperSaiyan status!';
-    alert('Congratulations! You achieved SuperSaiyan status!');
-  } else {
-    feedbackDiv.textContent = `Game Over! The word was "${secretWord.toUpperCase()}".`;
-    alert(`Game Over! The word was "${secretWord.toUpperCase()}". Better luck next time!`);
-    revealAllLetters();
-  }
-}
-
-function revealAllLetters() {
-  secretWord.split('').forEach((char, i) => {
-    let letterSpan = document.getElementById(`letter-${i}`);
-    letterSpan.textContent = `${char.toUpperCase()} `;
-  });
-}
-
-function startTimer() {
-  if (timeInterval || isGameOver) return; // Prevent multiple intervals or starting after game ends
-  startGameFlag = true;
-  timeInterval = setInterval(() => {
-    remainingTime--;
-    timerDisplay.textContent = `Time: ${remainingTime}s`;
-    if (remainingTime <= 0) {
-      clearInterval(timeInterval);
-      endGame(false); // Player loses
-    }
-  }, 1000);
-}
-
-/*-------------- Canvas Drawing -------------*/
-function clearCanvas() {
-  ctx.clearRect(0, 0, spacemanCanvas.width, spacemanCanvas.height);
-}
-
-function drawSpaceman(wrongGuesses) {
-  clearCanvas();
-  
-  // Draw based on number of wrong guesses
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = 'black';
-  
-  // Draw the base (bottom platform)
-  ctx.beginPath();
-  ctx.moveTo(20, 180);
-  ctx.lineTo(180, 180);
-  ctx.stroke();
-  
-  if (wrongGuesses >= 1) {
-    // Draw the vertical pole
-    ctx.beginPath();
-    ctx.moveTo(40, 180);
-    ctx.lineTo(40, 40);
-    ctx.stroke();
-  }
-  
-  if (wrongGuesses >= 2) {
-    // Draw the top beam
-    ctx.beginPath();
-    ctx.moveTo(40, 40);
-    ctx.lineTo(100, 40);
-    ctx.stroke();
-  }
-  
-  if (wrongGuesses >= 3) {
-    // Draw the noose
-    ctx.beginPath();
-    ctx.moveTo(100, 40);
-    ctx.lineTo(100, 60);
-    ctx.stroke();
-  }
-  
-  if (wrongGuesses >= 4) {
-    // Draw the head (with Super Saiyan hair!)
-    ctx.beginPath();
-    ctx.arc(100, 70, 10, 0, Math.PI * 2);
-    ctx.stroke();
-    
-    // Draw Super Saiyan spiky hair
-    ctx.beginPath();
-    ctx.moveTo(90, 65);
-    ctx.lineTo(85, 50);
-    ctx.moveTo(95, 60);
-    ctx.lineTo(90, 45);
-    ctx.moveTo(105, 60);
-    ctx.lineTo(110, 45);
-    ctx.moveTo(110, 65);
-    ctx.lineTo(115, 50);
-    ctx.stroke();
-  }
-  
-  if (wrongGuesses >= 5) {
-    // Draw the body and arms
-    ctx.beginPath();
-    ctx.moveTo(100, 80);
-    ctx.lineTo(100, 120);
-    // Left arm
-    ctx.moveTo(100, 90);
-    ctx.lineTo(80, 100);
-    // Right arm
-    ctx.moveTo(100, 90);
-    ctx.lineTo(120, 100);
-    ctx.stroke();
-  }
-  
-  if (wrongGuesses >= 6) {
-    // Draw the legs
-    ctx.beginPath();
-    // Left leg
-    ctx.moveTo(100, 120);
-    ctx.lineTo(85, 150);
-    // Right leg
-    ctx.moveTo(100, 120);
-    ctx.lineTo(115, 150);
-    ctx.stroke();
-    
-    // Add Super Saiyan aura
-    ctx.strokeStyle = 'gold';
-    ctx.beginPath();
-    for (let i = 0; i < 8; i++) {
-      const angle = i * Math.PI / 4;
-      const x1 = 100 + 25 * Math.cos(angle);
-      const y1 = 100 + 25 * Math.sin(angle);
-      const x2 = 100 + 35 * Math.cos(angle);
-      const y2 = 100 + 35 * Math.sin(angle);
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
-    }
-    ctx.stroke();
-  }
-}
-
-// Initialize the game when the page loads
-document.addEventListener('DOMContentLoaded', initializeGame);
