@@ -31,6 +31,7 @@ class HangmanGame {
     this.feedback = document.querySelector(feedback);
     this.canvas = document.getElementById(canvas);
     this.ctx = this.canvas.getContext('2d');
+    this.timerId = null;
 
     // Word list
     this.words = [
@@ -83,6 +84,7 @@ class HangmanGame {
     this.remainingTime = 120;
     this.wrongGuessCount = 0;
     clearInterval(this.timerId);
+    this.timerId = null;
 
     this.wordDisplay.innerHTML = '';
     this.guessedDisplay.textContent = 'Guessed Letters: _';
@@ -177,6 +179,7 @@ class HangmanGame {
       this.timerDisplay.textContent = `Time: ${this.remainingTime}s`;
       if (this.remainingTime <= 0) {
         clearInterval(this.timerId);
+        this.timerId = null;
         this.endGame(false);
       }
     }, 1000);
@@ -185,6 +188,7 @@ class HangmanGame {
   endGame(won) {
     this.isGameOver = true;
     clearInterval(this.timerId);
+    this.timerId = null;
     this.input.disabled = true;
     this.submitBtn.disabled = true;
     this.startBtn.disabled = false;
