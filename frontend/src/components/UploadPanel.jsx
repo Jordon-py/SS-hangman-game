@@ -14,6 +14,7 @@ export default function UploadPanel({ onSubmit, loading }) {
   const [monoSub, setMonoSub] = useState(false);
   const [dynamicEq, setDynamicEq] = useState(false);
   const [truepeakLimiter, setTruepeakLimiter] = useState(false);
+  const [warmth, setWarmth] = useState(0);
   const [targetLufs, setTargetLufs] = useState('');
   const [truePeakCeiling, setTruePeakCeiling] = useState('-1.0');
   const [openAdvanced, setOpenAdvanced] = useState(false);
@@ -46,6 +47,7 @@ export default function UploadPanel({ onSubmit, loading }) {
       mono_sub: monoSub,
       dynamic_eq: dynamicEq,
       truepeak_limiter: truepeakLimiter,
+      warmth: parseFloat(warmth),
       target_lufs: targetLufs ? parseFloat(targetLufs) : undefined,
       true_peak_ceiling: truePeakCeiling ? parseFloat(truePeakCeiling) : -1.0,
     };
@@ -67,23 +69,29 @@ export default function UploadPanel({ onSubmit, loading }) {
           onDrop={onDropTarget}
         >
           <label htmlFor="target-input" className="dropzone-label">{selectedTargetName}</label>
-          <input
-            id="target-input"
-            type="file"
-            accept=".wav,.mp3,.aiff,.flac,.ogg"
-            required
-            onChange={(e) => setTarget(e.target.files?.[0] || null)}
-          />
+          <div className="file-input-wrapper">
+            <input
+              id="target-input"
+              type="file"
+              accept=".wav,.mp3,.aiff,.flac,.ogg"
+              required
+              onChange={(e) => setTarget(e.target.files?.[0] || null)}
+            />
+            {target && <span className="filename">{target.name}</span>}
+          </div>
         </div>
 
         <div className="field">
           <label htmlFor="reference-input">Reference track (optional)</label>
-          <input
-            id="reference-input"
-            type="file"
-            accept=".wav,.mp3,.aiff,.flac,.ogg"
-            onChange={(e) => setReference(e.target.files?.[0] || null)}
-          />
+          <div className="file-input-wrapper">
+            <input
+              id="reference-input"
+              type="file"
+              accept=".wav,.mp3,.aiff,.flac,.ogg"
+              onChange={(e) => setReference(e.target.files?.[0] || null)}
+            />
+            {reference && <span className="filename">{reference.name}</span>}
+          </div>
         </div>
 
         <div className="preset-grid" role="radiogroup" aria-label="Mastering presets">
@@ -116,7 +124,31 @@ export default function UploadPanel({ onSubmit, loading }) {
               True-peak safe limiter + soft clip
             </label>
           </div>
-          <div className="field field-grid">
+          <div className="field">
+          <label htmlFor="warmth-range">Analog Warmth: {warmth}%</label>
+          <input
+            id="warmth-range"
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            value={warmth}
+            onChange={(e) => setWarmth(e.target.value)}
+          />
+        </div>
+        <div className="field">
+          <label htmlFor="warmth-range">Analog Warmth: {warmth}%</label>
+          <input
+            id="warmth-range"
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            value={warmth}
+            onChange={(e) => setWarmth(e.target.value)}
+          />
+        </div>
+        <div className="field field-grid">
             <div>
               <label htmlFor="target-lufs">Target LUFS (optional)</label>
               <input id="target-lufs" type="number" step="0.1" value={targetLufs} onChange={(e) => setTargetLufs(e.target.value)} placeholder="-11 to -9" />

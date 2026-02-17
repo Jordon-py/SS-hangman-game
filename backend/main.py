@@ -19,16 +19,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 
-from .config import settings
-from .jobs import job_manager
-from .schemas import ErrorResponse, JobCreateResponse, JobReportResponse, JobSettings, JobStatusResponse
+from config import settings
+from jobs import job_manager
+from schemas import ErrorResponse, JobCreateResponse, JobReportResponse, JobSettings, JobStatusResponse
 
 app = FastAPI(title="AuralMind Mastering Service", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.ALLOWED_ORIGINS or ["*"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

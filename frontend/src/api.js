@@ -12,13 +12,13 @@ async function apiFetch(path, { method = 'GET', headers = {}, body = null, timeo
     });
     clearTimeout(timer);
     if (!res.ok) {
+      const errorBody = await res.text();
       let msg = `Request failed: ${res.status}`;
       try {
-        const data = await res.json();
-        msg = data.detail || msg;
+        const data = JSON.parse(errorBody);
+        msg = data.detail || data.message || msg;
       } catch (_) {
-        const text = await res.text();
-        msg = text || msg;
+        msg = errorBody || msg;
       }
       throw new Error(msg);
     }
@@ -56,6 +56,10 @@ export async function fetchReport(id) {
 export async function fetchLogs(id, lines = 50) {
   const res = await apiFetch(`/api/jobs/${id}/logs?lines=${lines}`);
   return await res.text();
+}
+
+export async function cancelJob(id) {
+  return await apiFetch(`/api/jobs/${id}/cancel`, { method: 'POST' });
 }
 
 export async function downloadOutput(id) {

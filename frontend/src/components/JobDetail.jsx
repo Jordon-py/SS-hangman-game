@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { downloadOutput } from '../api.js';
+import { downloadOutput, cancelJob } from '../api.js';
 
 export default function JobDetail({ job, fetchReport, fetchLogs }) {
   const [report, setReport] = useState(null);
@@ -61,6 +61,17 @@ export default function JobDetail({ job, fetchReport, fetchLogs }) {
     window.URL.revokeObjectURL(url);
   };
 
+  const handleCancel = async () => {
+    if (!window.confirm('Are you sure you want to cancel this job?')) return;
+    try {
+      await cancelJob(job.id);
+      // Ideally, we should refresh the job status here, but the main loop in App will pick it up
+      // Or we can manually trigger a refresh if passed a prop
+    } catch (err) {
+      setError(err.message || 'Failed to cancel job');
+    }
+  };
+
   return (
     <div className="job-detail" aria-labelledby={`job-${job.id}`}>
       <h2 id={`job-${job.id}`}>Job {job.id.slice(0, 8)} details</h2>
@@ -80,6 +91,14 @@ export default function JobDetail({ job, fetchReport, fetchLogs }) {
             <h3>Report</h3>
             {report ? <pre>{JSON.stringify(report, null, 2)}</pre> : <p>No report available yet.</p>}
           </section>
+          <div className="actions">
+            {job.status === 'completed' && <button onClick={handleDownload}>Download Mastered File</button>}
+            {job.status !== 'completed' && job.status !== 'cancelled' && job.status !== 'failed' && (
+              <button onClick={handleCancel} className="cancel-btn">
+                Cancel Job
+              </button>
+            )}
+          </div>
         </>
       )}
     </div>

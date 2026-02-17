@@ -22,8 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional
 
-from .config import settings
-from .schemas import JobSettings
+from config import settings
+from schemas import JobCreateResponse, JobReportResponse, JobSettings, JobStatusResponse
 
 
 @dataclass
@@ -113,6 +113,8 @@ class JobManager:
             cmd.extend(["--target-lufs", str(job.settings.target_lufs)])
         if job.settings.true_peak_ceiling is not None:
             cmd.extend(["--true-peak-ceiling", str(job.settings.true_peak_ceiling)])
+        if job.settings.warmth > 0:
+            cmd.extend(["--warmth", str(job.settings.warmth)])
 
         env = os.environ.copy()
         log_file = open(job.log_path, "w", encoding="utf-8")

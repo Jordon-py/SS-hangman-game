@@ -80,6 +80,13 @@ class ErrorResponse(BaseModel):
             "a sensible target based on the preset and loudness governor."
         ),
     )
+    warmth: float = Field(
+        default=0.0,
+        title="Warmth",
+        description="Analog-style warmth (tilt EQ) from 0.0 to 1.0 (100%).",
+        ge=0.0,
+        le=100.0,
+    )
 
 
 class JobCreateResponse(BaseModel):

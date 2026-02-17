@@ -15,8 +15,21 @@ export default function App() {
     if (jobs.length === 0) return;
     const interval = setInterval(async () => {
       try {
-        const updated = await Promise.all(jobs.map((job) => fetchJobStatus(job.id)));
-        setJobs(updated);
+        const activeJobs = jobs.filter((job) => ['queued', 'processing'].includes(job.status));
+        if (activeJobs.length === 0) return;
+
+        const updatedStatuses = await Promise.all(activeJobs.map((job) => fetchJobStatus(job.id)));
+        
+        setJobs((prevJobs) => {
+          const newJobs = [...prevJobs];
+          updatedStatuses.forEach((updatedJob) => {
+            const index = newJobs.findIndex((j) => j.id === updatedJob.id);
+            if (index !== -1) {
+              newJobs[index] = updatedJob;
+            }
+          });
+          return newJobs;
+        });
       } catch (err) {
         console.error(err);
       }
