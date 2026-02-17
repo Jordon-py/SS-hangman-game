@@ -1,58 +1,92 @@
-README
-The SuperSaiyan Game
-The SuperSaiyan Game is a fun and engaging word-guessing game where players attempt to uncover a hidden space-themed word before the timer runs out. Each incorrect guess brings the SuperSaiyan closer to being fully drawn. Test your vocabulary and racing against time in this minimalistic and professional web-based game.
+# AuralMind Match Maestro Web App
 
-Table of Contents
-Features
-Installation
-Usage
-Game Instructions
-Technologies Used
-Contributing
-License
-Features
-Interactive Gameplay: Guess letters to reveal the hidden word.
-Timer Challenge: Race against the clock to win the game.
-Visual Feedback: Receive real-time feedback on your guesses.
-Responsive Design: Play seamlessly on various devices.
-Installation
-Clone the Repository
+Full-stack mastering wrapper around `auralmind_match_maestro_v7_3_expert1.py` with FastAPI + React/Vite.
 
-bash
-Copy code
-git clone https://github.com/Jordon-py/spaceman-game
-Navigate to the Project Directory
+## Project structure
 
-bash
-Copy code
-cd supersaiyan-game
-Open the Game
+```text
+.
+├─ auralmind_match_maestro_v7_3_expert1.py
+├─ backend/
+│  ├─ main.py
+│  ├─ jobs.py
+│  ├─ schemas.py
+│  ├─ config.py
+│  ├─ smoke_test.py
+│  └─ .env.example
+└─ frontend/
+   ├─ src/
+   │  ├─ App.jsx
+   │  ├─ api.js
+   │  ├─ styles.css
+   │  └─ components/
+   ├─ package.json
+   └─ vite.config.js
+```
 
-Open index.html in your preferred web browser.
+## Backend run
 
-Usage
-Start the Game
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install fastapi uvicorn pydantic python-multipart requests numpy
+uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+```
 
-Click the Start button to begin the timer and start guessing.
+## Frontend run
 
-Make a Guess
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
-Enter a single alphabetical character in the input box.
-Click Submit Guess to verify your input.
-Reset the Game
+## DSP modules (all default OFF)
 
-Click the Reset button to restart the game at any time.
+The CLI preserves original contract and adds optional flags:
 
-Game Instructions
-Objective: Guess the hidden space-related word before the timer runs out.
-How to Play:
-Type your guess in the input box.
-Click Submit Guess to make a guess.
-Each incorrect guess brings the SuperSaiyan closer to being fully drawn.
-Win by revealing all letters before time expires.
-Technologies Used
-HTML5: Structure of the game interface.
-CSS3: Styling and layout.
-JavaScript (ES6): Game logic and interactivity.
-Contributing
-Contributions are welcome! Please fork the repository and submit a pull request for any enhancements or bug fixes.
+- `--enable-mono-sub`: sub-band mono + phase anchor (<120 Hz)
+- `--enable-masking-dynamic-eq`: dynamic low-mid cleanup (200–500 Hz)
+- `--enable-truepeak-limiter`: true-peak safer limiter + soft clip
+- `--target-lufs <float>`: optional LUFS estimate target
+- `--true-peak-ceiling <float>`: default `-1.0` dBTP
+
+### Theory-grounded implemented enhancements
+
+1. **Sub-band mono + phase anchor**
+   - Fixes: low-end cancellation and unstable mono playback.
+   - Why: very low frequencies localize poorly; phase mismatch hurts punch.
+   - Safety: toggle only, stereo mids/highs preserved.
+
+2. **Masking-aware dynamic EQ (200–500 Hz)**
+   - Fixes: intermittent mud masking vocals/snare harmonics.
+   - Why: dynamic masking is program-dependent; static cuts remove warmth.
+   - Safety: reduction cap (~2.5 dB), toggle only.
+
+## Innovative trap-mastering blueprints (not fully implemented)
+
+1. **Hook Energy Lens**
+   - Detect hook sections from RMS + spectral flux, then add +0.5 dB width only in hooks.
+   - Trap fit: enhances chorus lift while keeping verses tight.
+   - Risk/fallback: hard bypass if section detection confidence < threshold.
+
+2. **808 Harmonic Guardrail Exciter**
+   - Generate keyed harmonics above 808 fundamental while protecting 35–65 Hz crest.
+   - Trap fit: keeps 808 audible on small speakers without flattening sub impact.
+   - Risk/fallback: bypass if crest factor drop > 1.5 dB.
+
+## Next-gen rhythm perception ideas
+
+1. **Groove-Locked Transient Sculptor**
+   - Place after dynamic EQ, before limiter.
+   - Detect onsets + tempo and apply capped transient boosts (default +0.8 dB, 8 ms attack, 45 ms release).
+
+2. **Swing-Aware Hat Tamer**
+   - Place after tonal shaping.
+   - Dynamic control in 6–12 kHz with release tied to rhythmic density (default 30–80 ms).
+
+## Notes
+
+- Backend jobs are asynchronous and in-memory.
+- `report.json` includes before/after estimated LUFS, true-peak estimate, crest factor, and dynamic range.
+- Non-WAV inputs are copied unchanged (DSP safely skipped).
