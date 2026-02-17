@@ -1,58 +1,61 @@
-README
-The SuperSaiyan Game
-The SuperSaiyan Game is a fun and engaging word-guessing game where players attempt to uncover a hidden space-themed word before the timer runs out. Each incorrect guess brings the SuperSaiyan closer to being fully drawn. Test your vocabulary and racing against time in this minimalistic and professional web-based game.
+# AuralMind Match Maestro Web App
 
-Table of Contents
-Features
-Installation
-Usage
-Game Instructions
-Technologies Used
-Contributing
-License
-Features
-Interactive Gameplay: Guess letters to reveal the hidden word.
-Timer Challenge: Race against the clock to win the game.
-Visual Feedback: Receive real-time feedback on your guesses.
-Responsive Design: Play seamlessly on various devices.
-Installation
-Clone the Repository
+This repository contains a full-stack wrapper around `auralmind_match_maestro_v7_3_expert1.py`.
 
-bash
-Copy code
-git clone https://github.com/Jordon-py/spaceman-game
-Navigate to the Project Directory
+## Project structure
 
-bash
-Copy code
-cd supersaiyan-game
-Open the Game
+```text
+.
+├─ README.md
+├─ auralmind_match_maestro_v7_3_expert1.py
+├─ backend/
+│  ├─ __init__.py
+│  ├─ config.py
+│  ├─ jobs.py
+│  ├─ main.py
+│  ├─ schemas.py
+│  ├─ .env.example
+│  └─ smoke_test.py
+└─ frontend/
+   ├─ package.json
+   ├─ vite.config.js
+   ├─ .env.example
+   └─ src/
+      ├─ main.jsx
+      ├─ App.jsx
+      ├─ api.js
+      ├─ components/
+      │  ├─ UploadPanel.jsx
+      │  ├─ JobList.jsx
+      │  └─ JobDetail.jsx
+      └─ styles.css
+```
 
-Open index.html in your preferred web browser.
+## Backend (FastAPI)
 
-Usage
-Start the Game
+### Run
 
-Click the Start button to begin the timer and start guessing.
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install fastapi uvicorn pydantic python-multipart requests
+uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+```
 
-Make a Guess
+## Frontend (React + Vite)
 
-Enter a single alphabetical character in the input box.
-Click Submit Guess to verify your input.
-Reset the Game
+### Run
 
-Click the Reset button to restart the game at any time.
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
-Game Instructions
-Objective: Guess the hidden space-related word before the timer runs out.
-How to Play:
-Type your guess in the input box.
-Click Submit Guess to make a guess.
-Each incorrect guess brings the SuperSaiyan closer to being fully drawn.
-Win by revealing all letters before time expires.
-Technologies Used
-HTML5: Structure of the game interface.
-CSS3: Styling and layout.
-JavaScript (ES6): Game logic and interactivity.
-Contributing
-Contributions are welcome! Please fork the repository and submit a pull request for any enhancements or bug fixes.
+Default frontend URL: `http://localhost:5173`
+
+## Notes
+
+- The backend executes jobs asynchronously in a thread pool.
+- Job state is in-memory and resets on restart.
+- Update environment variables using `backend/.env.example` and `frontend/.env.example`.
