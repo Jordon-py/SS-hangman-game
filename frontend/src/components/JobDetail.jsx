@@ -14,19 +14,15 @@ export default function JobDetail({ job, fetchReport, fetchLogs }) {
       setLoading(true);
       setError(null);
       try {
-        const [rep, log] = await Promise.all([fetchReport().catch(() => null), fetchLogs(50).catch(() => '')]);
+        const [rep, log] = await Promise.all([fetchReport().catch(() => null), fetchLogs(80).catch(() => '')]);
         if (!cancelled) {
           setReport(rep?.report || null);
           setLogs(log || '');
         }
       } catch (err) {
-        if (!cancelled) {
-          setError(err.message || 'Failed to fetch details');
-        }
+        if (!cancelled) setError(err.message || 'Failed to fetch details');
       } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
+        if (!cancelled) setLoading(false);
       }
     }
 
@@ -36,7 +32,7 @@ export default function JobDetail({ job, fetchReport, fetchLogs }) {
     };
   }, [job.id, fetchLogs, fetchReport]);
 
-  const handleDownload = async () => {
+  const handleDownloadMaster = async () => {
     try {
       const { blob, filename } = await downloadOutput(job.id);
       const url = window.URL.createObjectURL(blob);
@@ -52,6 +48,19 @@ export default function JobDetail({ job, fetchReport, fetchLogs }) {
     }
   };
 
+  const handleDownloadReport = () => {
+    if (!report) return;
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `report_${job.id}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="job-detail" aria-labelledby={`job-${job.id}`}>
       <h2 id={`job-${job.id}`}>Job {job.id.slice(0, 8)} details</h2>
@@ -59,6 +68,10 @@ export default function JobDetail({ job, fetchReport, fetchLogs }) {
       {error && <p className="error" role="alert">{error}</p>}
       {!loading && !error && (
         <>
+          <div className="actions-row">
+            <button type="button" onClick={handleDownloadReport} disabled={!report}>Download Report</button>
+            {job.status === 'completed' && <button type="button" onClick={handleDownloadMaster}>Download Master</button>}
+          </div>
           <section className="logs">
             <h3>Logs (tail)</h3>
             <pre>{logs || 'No logs yet.'}</pre>
@@ -67,7 +80,6 @@ export default function JobDetail({ job, fetchReport, fetchLogs }) {
             <h3>Report</h3>
             {report ? <pre>{JSON.stringify(report, null, 2)}</pre> : <p>No report available yet.</p>}
           </section>
-          {job.status === 'completed' && <button onClick={handleDownload}>Download Mastered File</button>}
         </>
       )}
     </div>

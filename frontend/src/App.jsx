@@ -1,3 +1,4 @@
+import React, { useEffect, useMemo, useState } from 'react';
 import React, { useEffect, useState } from 'react';
 import { createJob, fetchJobStatus, fetchLogs, fetchReport } from './api.js';
 import JobDetail from './components/JobDetail.jsx';
@@ -19,6 +20,7 @@ export default function App() {
       } catch (err) {
         console.error(err);
       }
+    }, 2500);
     }, 3000);
     return () => clearInterval(interval);
   }, [jobs.length]);
@@ -28,6 +30,8 @@ export default function App() {
     setError(null);
     try {
       const res = await createJob(formData, settings);
+      setJobs((prev) => [res, ...prev]);
+      setSelectedJobId(res.id);
       setJobs((prev) => [...prev, res]);
     } catch (err) {
       setError(err.message || 'Failed to create job');
@@ -37,6 +41,14 @@ export default function App() {
   };
 
   const selectedJob = jobs.find((j) => j.id === selectedJobId) || null;
+  const activeCount = useMemo(() => jobs.filter((j) => ['queued', 'processing'].includes(j.status)).length, [jobs]);
+
+  return (
+    <div className="container">
+      <header className="app-header">
+        <h1>AuralMind Mastering</h1>
+        <p className="subtle">Premium mastering workflow • Active jobs: {activeCount}</p>
+      </header>
 
   return (
     <div className="container">

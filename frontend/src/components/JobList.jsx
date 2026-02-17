@@ -12,18 +12,21 @@ export default function JobList({ jobs, onSelect }) {
           <th>ID</th>
           <th>Status</th>
           <th>Progress</th>
+          <th>Created</th>
         </tr>
       </thead>
       <tbody>
         {jobs.map((job) => (
-          <tr key={job.id} onClick={() => onSelect(job.id)} className="job-row">
+          <tr key={job.id} onClick={() => onSelect(job.id)} className="job-row" aria-label={`Open job ${job.id}`}>
             <td>{job.id.slice(0, 8)}</td>
-            <td>{job.status}</td>
+            <td><span className={`badge status-${job.status}`}>{job.status}</span></td>
             <td>
-              <div className="progress-bar" aria-valuenow={job.progress} aria-valuemin="0" aria-valuemax="100">
+              <div className="progress-bar" aria-valuenow={job.progress} aria-valuemin="0" aria-valuemax="100" role="progressbar">
                 <div className="progress" style={{ width: `${job.progress}%` }} />
               </div>
+              <small>{Math.round(job.progress)}%</small>
             </td>
+            <td>{new Date(job.created_at).toLocaleTimeString()}</td>
           </tr>
         ))}
       </tbody>

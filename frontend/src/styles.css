@@ -1,156 +1,138 @@
 :root {
-  --bg: lch(97% 0 270);
-  --fg: lch(20% 15 250);
-  --primary: lch(55% 60 30);
-  --primary-contrast: #ffffff;
-  --secondary: lch(80% 20 70);
-  --error: lch(45% 100 20);
-  --border: lch(85% 5 260);
+  --bg: lch(97% 4 260);
+  --surface: lch(99% 1 260);
+  --surface-2: lch(94% 6 262);
+  --text: lch(23% 12 265);
+  --muted: lch(48% 8 265);
+  --accent: lch(57% 56 296);
+  --accent-strong: lch(48% 66 300);
+  --success: lch(62% 48 145);
+  --warn: lch(72% 62 85);
+  --danger: lch(52% 73 28);
+  --border: lch(86% 5 260);
+  --radius: 12px;
+  --shadow: 0 8px 24px lch(15% 3 260 / 0.08);
 }
 
+* { box-sizing: border-box; }
 body {
   margin: 0;
-  padding: 0;
-  font-family: sans-serif;
-  background-color: var(--bg);
-  color: var(--fg);
+  font-family: Inter, 'Segoe UI', sans-serif;
+  background: linear-gradient(160deg, var(--bg), var(--surface-2));
+  color: var(--text);
   line-height: 1.5;
 }
 
-.container {
-  max-width: 800px;
-  margin: 0 auto;
-  padding: 1rem;
-}
+.container { max-width: 920px; margin: 0 auto; padding: 1.25rem; }
+.app-header h1 { margin-bottom: 0.2rem; }
+.subtle { color: var(--muted); margin-top: 0; }
 
-h1 {
-  text-align: center;
-  margin-top: 0;
-}
-
-form.panel {
-  background-color: var(--secondary);
-  padding: 1rem;
-  border-radius: 8px;
-  margin-bottom: 1.5rem;
-}
-
-form.panel fieldset {
-  border: none;
-  padding: 0;
-  margin: 0;
-}
-
-form.panel legend {
-  font-weight: bold;
-  margin-bottom: 0.5rem;
-}
-
-.field {
-  margin-bottom: 1rem;
-  display: flex;
-  flex-direction: column;
-}
-
-.field label {
-  margin-bottom: 0.25rem;
-  font-weight: 600;
-}
-
-.field input[type='file'],
-.field select,
-.field input[type='number'] {
-  padding: 0.4rem;
+.panel,
+.job-detail,
+.job-table {
+  background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 4px;
-  font-size: 1rem;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
 }
 
-.field.checkbox-group {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1rem;
-  align-items: center;
+form.panel { padding: 1rem; margin-bottom: 1.25rem; }
+form.panel fieldset { border: none; padding: 0; margin: 0; }
+legend { font-size: 1.05rem; font-weight: 700; margin-bottom: 0.75rem; }
+
+.dropzone {
+  border: 2px dashed var(--accent);
+  border-radius: 10px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  background: lch(98% 5 295);
+}
+.dropzone.is-dragging { background: lch(94% 14 296); }
+.dropzone input[type='file'] { width: 100%; }
+.dropzone-label { display: block; margin-bottom: 0.4rem; font-weight: 600; }
+
+.field { margin-bottom: 1rem; display: flex; flex-direction: column; gap: 0.25rem; }
+.field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
+
+input, select, button, summary {
+  font: inherit;
 }
 
-.field.checkbox-group label {
-  display: flex;
-  align-items: center;
-  gap: 0.25rem;
-  font-weight: 400;
+input[type='file'],
+input[type='number'],
+select {
+  width: 100%;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
 }
 
 button {
-  background-color: var(--primary);
-  color: var(--primary-contrast);
-  border: none;
-  padding: 0.6rem 1.2rem;
-  border-radius: 4px;
-  font-size: 1rem;
+  background: var(--accent);
+  color: white;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 0.55rem 0.9rem;
   cursor: pointer;
+  transition: transform 120ms ease, background 120ms ease;
+}
+button:hover { background: var(--accent-strong); transform: translateY(-1px); }
+button:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
 }
 
-button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.error {
-  color: var(--error);
-  margin: 0.5rem 0;
-}
-
-.job-table {
-  width: 100%;
-  border-collapse: collapse;
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
   margin-bottom: 1rem;
 }
 
-.job-table th,
-.job-table td {
-  padding: 0.5rem;
-  border-bottom: 1px solid var(--border);
+.preset-card {
   text-align: left;
-}
-
-.job-row {
-  cursor: pointer;
-}
-
-.job-row:hover {
-  background-color: var(--border);
-}
-
-.progress-bar {
-  position: relative;
-  width: 100%;
-  height: 0.5rem;
-  background-color: var(--border);
-  border-radius: 4px;
-  overflow: hidden;
-}
-
-.progress {
-  background-color: var(--primary);
-  height: 100%;
-  transition: width 0.5s ease;
-}
-
-.job-detail {
+  background: var(--surface-2);
+  color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1rem;
-  margin-bottom: 2rem;
-  background-color: var(--secondary);
+  padding: 0.8rem;
+}
+.preset-card.is-active { border-color: var(--accent); background: lch(92% 20 300); }
+.preset-card span { display: block; font-size: 0.86rem; color: var(--muted); }
+
+.advanced summary { cursor: pointer; margin-bottom: 0.75rem; color: var(--accent-strong); font-weight: 600; }
+.checkbox-group { gap: 0.6rem; }
+.checkbox-group label { font-weight: 500; display: flex; gap: 0.5rem; align-items: center; }
+
+.error { color: var(--danger); font-weight: 600; }
+
+.job-table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; overflow: hidden; }
+.job-table th, .job-table td { padding: 0.6rem; border-bottom: 1px solid var(--border); text-align: left; }
+.job-row { cursor: pointer; }
+.job-row:hover { background: lch(95% 7 275); }
+
+.badge { border-radius: 999px; padding: 0.16rem 0.6rem; font-size: 0.8rem; text-transform: capitalize; }
+.status-completed { background: lch(90% 20 145); color: lch(32% 22 145); }
+.status-failed, .status-cancelled { background: lch(91% 16 30); color: lch(40% 50 30); }
+.status-processing, .status-queued { background: lch(92% 13 290); color: lch(38% 34 290); }
+
+.progress-bar { width: 100%; height: 0.5rem; background: var(--border); border-radius: 99px; overflow: hidden; margin-bottom: 0.22rem; }
+.progress { height: 100%; background: linear-gradient(90deg, var(--accent), lch(70% 50 320)); transition: width 240ms ease; }
+
+.job-detail { padding: 1rem; margin-bottom: 2rem; }
+.actions-row { display: flex; gap: 0.5rem; margin-bottom: 0.8rem; }
+pre { background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 0.6rem; overflow-x: auto; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
 }
 
-.job-detail h3 {
-  margin-top: 0;
-}
-
-.job-detail pre {
-  background-color: var(--bg);
-  padding: 0.5rem;
-  border-radius: 4px;
-  overflow-x: auto;
+@media (max-width: 720px) {
+  .preset-grid, .field-grid { grid-template-columns: 1fr; }
 }
