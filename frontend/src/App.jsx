@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { createJob, fetchJobStatus, fetchLogs, fetchReport } from './api.js';
 import JobDetail from './components/JobDetail.jsx';
 import JobList from './components/JobList.jsx';
@@ -20,6 +21,7 @@ export default function App() {
         console.error(err);
       }
     }, 2500);
+    }, 3000);
     return () => clearInterval(interval);
   }, [jobs.length]);
 
@@ -30,6 +32,7 @@ export default function App() {
       const res = await createJob(formData, settings);
       setJobs((prev) => [res, ...prev]);
       setSelectedJobId(res.id);
+      setJobs((prev) => [...prev, res]);
     } catch (err) {
       setError(err.message || 'Failed to create job');
     } finally {
@@ -46,6 +49,10 @@ export default function App() {
         <h1>AuralMind Mastering</h1>
         <p className="subtle">Premium mastering workflow • Active jobs: {activeCount}</p>
       </header>
+
+  return (
+    <div className="container">
+      <h1>AuralMind Mastering</h1>
       <UploadPanel onSubmit={handleSubmit} loading={loading} />
       {error && <p className="error" role="alert">{error}</p>}
       <JobList jobs={jobs} onSelect={setSelectedJobId} />
