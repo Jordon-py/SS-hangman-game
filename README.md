@@ -37,7 +37,7 @@ This repository contains a full-stack wrapper around `auralmind_match_maestro_v7
 
 ```bash
 python -m venv .venv
-venv/script /activate
+venv/script/activate
 pip install fastapi uvicorn pydantic python-multipart requests
 uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 ```

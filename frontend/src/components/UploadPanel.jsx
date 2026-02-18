@@ -1,10 +1,10 @@
 import React, { useMemo, useState } from 'react';
 
 const PRESETS = [
-  { id: 'hi_fi_streaming', name: 'Hi-Fi Streaming', description: 'Balanced clarity, streaming-safe headroom.' },
-  { id: 'radio_loud', name: 'Radio Loud', description: 'Forward energy with tasteful loudness push.' },
-  { id: 'cinematic', name: 'Wide Cinematic', description: 'Open spatial feel with preserved dynamics.' },
-  { id: 'club', name: 'Club Impact', description: 'Low-end focus and punch for louder systems.' },
+  { id: 'hi_fi_streaming', name: 'Hi-Fi Streaming', description: 'Neutral translation with harmonic interval clarity.' },
+  { id: 'radio_loud', name: 'Radio Loud', description: 'Presence-forward vocal contour with controlled punch.' },
+  { id: 'cinematic', name: 'Wide Cinematic', description: 'Expanded depth and motion for orchestral or score energy.' },
+  { id: 'club', name: 'Club Impact', description: '808 phase-anchored low end with groove-locked transient drive.' },
 ];
 
 export default function UploadPanel({ onSubmit, loading }) {
@@ -125,30 +125,18 @@ export default function UploadPanel({ onSubmit, loading }) {
             </label>
           </div>
           <div className="field">
-          <label htmlFor="warmth-range">Analog Warmth: {warmth}%</label>
-          <input
-            id="warmth-range"
-            type="range"
-            min="0"
-            max="100"
-            step="1"
-            value={warmth}
-            onChange={(e) => setWarmth(e.target.value)}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="warmth-range">Analog Warmth: {warmth}%</label>
-          <input
-            id="warmth-range"
-            type="range"
-            min="0"
-            max="100"
-            step="1"
-            value={warmth}
-            onChange={(e) => setWarmth(e.target.value)}
-          />
-        </div>
-        <div className="field field-grid">
+            <label htmlFor="warmth-range">Analog Warmth: {warmth}%</label>
+            <input
+              id="warmth-range"
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value={warmth}
+              onChange={(e) => setWarmth(e.target.value)}
+            />
+          </div>
+          <div className="field field-grid">
             <div>
               <label htmlFor="target-lufs">Target LUFS (optional)</label>
               <input id="target-lufs" type="number" step="0.1" value={targetLufs} onChange={(e) => setTargetLufs(e.target.value)} placeholder="-11 to -9" />

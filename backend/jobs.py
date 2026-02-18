@@ -10,7 +10,6 @@ directory.
 
 from __future__ import annotations
 
-import asyncio
 import datetime as dt
 import os
 import subprocess
@@ -22,8 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional
 
-from config import settings
-from schemas import JobCreateResponse, JobReportResponse, JobSettings, JobStatusResponse
+from .config import settings
+from .schemas import JobSettings
 
 
 @dataclass
@@ -56,7 +55,6 @@ class JobManager:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.jobs: Dict[str, Job] = {}
         self.executor = ThreadPoolExecutor(max_workers=2)
-        self.loop = asyncio.get_event_loop()
 
     def create_job(self, settings_obj: JobSettings) -> Job:
         """Create a new job and register it in the registry."""

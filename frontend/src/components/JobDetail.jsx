@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { downloadOutput, cancelJob } from '../api.js';
+import { cancelJob, downloadOutput, fetchLogs as fetchJobLogs, fetchReport as fetchJobReport } from '../api.js';
 
-export default function JobDetail({ job, fetchReport, fetchLogs }) {
+export default function JobDetail({ job }) {
   const [report, setReport] = useState(null);
   const [logs, setLogs] = useState('');
   const [loading, setLoading] = useState(false);
@@ -9,12 +9,18 @@ export default function JobDetail({ job, fetchReport, fetchLogs }) {
 
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
 
     async function load() {
+      if (inFlight) return;
+      inFlight = true;
       setLoading(true);
       setError(null);
       try {
-        const [rep, log] = await Promise.all([fetchReport().catch(() => null), fetchLogs(80).catch(() => '')]);
+        const reportPromise =
+          job.status === 'completed' ? fetchJobReport(job.id).catch(() => null) : Promise.resolve(null);
+        const logsPromise = fetchJobLogs(job.id, 80).catch(() => '');
+        const [rep, log] = await Promise.all([reportPromise, logsPromise]);
         if (!cancelled) {
           setReport(rep?.report || null);
           setLogs(log || '');
@@ -22,15 +28,25 @@ export default function JobDetail({ job, fetchReport, fetchLogs }) {
       } catch (err) {
         if (!cancelled) setError(err.message || 'Failed to fetch details');
       } finally {
+        inFlight = false;
         if (!cancelled) setLoading(false);
       }
     }
 
     load();
+    const shouldPoll = ['queued', 'processing'].includes(job.status);
+    if (!shouldPoll) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const interval = setInterval(load, 4000);
     return () => {
       cancelled = true;
+      clearInterval(interval);
     };
-  }, [job.id, fetchLogs, fetchReport]);
+  }, [job.id, job.status]);
 
   const handleDownloadMaster = async () => {
     try {
@@ -80,7 +96,9 @@ export default function JobDetail({ job, fetchReport, fetchLogs }) {
       {!loading && !error && (
         <>
           <div className="actions-row">
-            <button type="button" onClick={handleDownloadReport} disabled={!report}>Download Report</button>
+            <button type="button" onClick={handleDownloadReport} disabled={!report}>
+              Download Report
+            </button>
             {job.status === 'completed' && <button type="button" onClick={handleDownloadMaster}>Download Master</button>}
           </div>
           <section className="logs">
@@ -91,10 +109,9 @@ export default function JobDetail({ job, fetchReport, fetchLogs }) {
             <h3>Report</h3>
             {report ? <pre>{JSON.stringify(report, null, 2)}</pre> : <p>No report available yet.</p>}
           </section>
-          <div className="actions">
-            {job.status === 'completed' && <button onClick={handleDownload}>Download Mastered File</button>}
+          <div className="actions-row">
             {job.status !== 'completed' && job.status !== 'cancelled' && job.status !== 'failed' && (
-              <button onClick={handleCancel} className="cancel-btn">
+              <button type="button" onClick={handleCancel} className="cancel-btn">
                 Cancel Job
               </button>
             )}

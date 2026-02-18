@@ -7,6 +7,8 @@ with your original mastering implementation if needed.
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
+from contextlib import contextmanager
 import logging
 import os
 import sys
@@ -14,14 +16,36 @@ import math
 import json
 import time
 from dataclasses import dataclass, replace
-from typing import Optional, Tuple, Dict, Any, Union
-import librosa
+from pathlib import Path
+from typing import Optional, Tuple, Dict, Any, Union, List
+
 import numpy as np
 import soundfile as sf
 import scipy
 import scipy.signal as sps
 from scipy.signal import fftconvolve
 from scipy.ndimage import maximum_filter1d
+
+try:
+    import librosa  # type: ignore
+    _HAS_LIBROSA = True
+except Exception:
+    librosa = None  # type: ignore
+    _HAS_LIBROSA = False
+
+try:
+    import soxr  # type: ignore
+    _HAS_SOXR = True
+except Exception:
+    soxr = None  # type: ignore
+    _HAS_SOXR = False
+
+try:
+    import psutil  # type: ignore
+    _HAS_PSUTIL = True
+except Exception:
+    psutil = None  # type: ignore
+    _HAS_PSUTIL = False
 
 # Optional Demucs (HT-Demucs stem separation) — enabled by default, with graceful fallback
 try:
@@ -68,11 +92,75 @@ def next_pow2(n: int) -> int:
         return 1
     return 1 << (n - 1).bit_length()
 
+
+def _rss_mb() -> Optional[float]:
+    """Best-effort resident memory estimate (MB)."""
+    if _HAS_PSUTIL:
+        try:
+            return float(psutil.Process(os.getpid()).memory_info().rss) / (1024.0 * 1024.0)
+        except Exception:
+            return None
+    return None
+
+
+@dataclass
+class Profiler:
+    enabled: bool = False
+    stage_sec: Dict[str, float] = None  # type: ignore[assignment]
+    peak_rss_mb: float = 0.0
+    _active_name: Optional[str] = None
+    _active_t0: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.stage_sec = {}
+        if self.enabled:
+            m = _rss_mb()
+            if m is not None:
+                self.peak_rss_mb = max(self.peak_rss_mb, float(m))
+
+    @contextmanager
+    def stage(self, name: str):
+        if not self.enabled:
+            yield
+            return
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            dt = float(time.perf_counter() - t0)
+            self.stage_sec[name] = self.stage_sec.get(name, 0.0) + dt
+            m = _rss_mb()
+            if m is not None:
+                self.peak_rss_mb = max(self.peak_rss_mb, float(m))
+
+    def summary_table(self) -> str:
+        if not self.enabled:
+            return ""
+        lines = [
+            "PROFILE SUMMARY",
+            "Stage                          Seconds",
+            "--------------------------------------",
+        ]
+        total = 0.0
+        for k in ("io", "resample", "analysis", "fir_match_eq", "dynamics", "limiter_governor", "export"):
+            v = float(self.stage_sec.get(k, 0.0))
+            total += v
+            lines.append(f"{k:30s} {v:7.3f}")
+        lines.append("--------------------------------------")
+        lines.append(f"{'total_profiled':30s} {total:7.3f}")
+        if self.peak_rss_mb > 0.0:
+            lines.append(f"{'peak_rss_mb':30s} {self.peak_rss_mb:7.1f}")
+        else:
+            lines.append(f"{'peak_rss_mb':30s} {'n/a':>7s}")
+        return "\n".join(lines)
+
 # ------------------------------------
 # Module logger + FIR spectrum cache
 # ------------------------------------
 log = logging.getLogger("auralmind")
 _FIR_CACHE: Dict[tuple, np.ndarray] = {}
+_K_WEIGHT_CACHE: Dict[int, Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]] = {}
+_RESAMPLE_BACKEND_COUNTS: Dict[str, int] = defaultdict(int)
 
 def smoothstep(x: float, lo: float, hi: float) -> float:
     """0..1 smooth curve between lo and hi."""
@@ -95,12 +183,24 @@ def to_mono(y: np.ndarray) -> np.ndarray:
 
 def resample_audio(y: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
     if sr_in == sr_out:
-        return y
-    # Use polyphase for quality + speed
+        return np.asarray(y, dtype=np.float32)
+
+    x = np.asarray(y, dtype=np.float32)
+    if _HAS_SOXR:
+        try:
+            # Optional high-quality backend with better stop-band rejection for SRC.
+            out = np.asarray(soxr.resample(x, sr_in, sr_out, quality="HQ"), dtype=np.float32)
+            _RESAMPLE_BACKEND_COUNTS["soxr"] += 1
+            return out
+        except Exception:
+            pass
+
+    # Fallback: scipy polyphase resampler.
     g = math.gcd(sr_in, sr_out)
     up = sr_out // g
     down = sr_in // g
-    return sps.resample_poly(y, up=up, down=down, axis=0).astype(np.float32)
+    _RESAMPLE_BACKEND_COUNTS["scipy_polyphase"] += 1
+    return sps.resample_poly(x, up=up, down=down, axis=0).astype(np.float32)
 
 def butter_highpass(cut_hz: float, sr: int, order: int = 2):
     nyq = 0.5 * sr
@@ -134,17 +234,25 @@ def windowed_fft_mag(x: np.ndarray, n_fft: int, hop: int) -> np.ndarray:
     """Return average magnitude spectrum (linear) across frames for mono x."""
     if x.ndim != 1:
         raise ValueError("windowed_fft_mag expects mono array.")
+    n_fft = int(n_fft)
+    hop = max(1, int(hop))
+    x = np.ascontiguousarray(np.asarray(x, dtype=np.float32))
+    if x.size < n_fft:
+        x = np.pad(x, (0, n_fft - x.size))
+    n_frames = 1 + max(0, (x.size - n_fft + hop - 1) // hop)
+    need = (n_frames - 1) * hop + n_fft
+    if need > x.size:
+        x = np.pad(x, (0, need - x.size))
+    stride = x.strides[0]
+    frames = np.lib.stride_tricks.as_strided(
+        x,
+        shape=(n_frames, n_fft),
+        strides=(hop * stride, stride),
+        writeable=False,
+    )
     win = np.hanning(n_fft).astype(np.float32)
-    mags = []
-    for start in range(0, max(1, len(x) - n_fft), hop):
-        frame = x[start:start+n_fft]
-        if len(frame) < n_fft:
-            frame = np.pad(frame, (0, n_fft - len(frame)))
-        spec = np.fft.rfft(frame * win)
-        mags.append(np.abs(spec))
-    if not mags:
-        return np.zeros(n_fft//2 + 1, dtype=np.float32)
-    return np.mean(np.stack(mags, axis=0), axis=0).astype(np.float32)
+    spec = np.fft.rfft(frames * win[None, :], axis=1)
+    return np.mean(np.abs(spec), axis=0).astype(np.float32)
 
 
 # ---------------------------
@@ -157,6 +265,11 @@ def k_weighting_filter(sr: int):
     This is not a full standard-validated implementation, but is stable and
     consistent for controlling relative loudness in this script.
     """
+    sr = int(sr)
+    cached = _K_WEIGHT_CACHE.get(sr)
+    if cached is not None:
+        return cached
+
     # High-pass around 60 Hz (prevents sub-dominance in loudness estimate)
     b1, a1 = sps.butter(2, 60.0 / (0.5 * sr), btype="highpass")
     # Gentle high-shelf (~ +4 dB above ~1.5 kHz) to approximate K-weighting tilt
@@ -176,9 +289,14 @@ def k_weighting_filter(sr: int):
     a1s =    2*((A-1) - (A+1)*cosw0)
     a2 =        (A+1) - (A-1)*cosw0 - 2*math.sqrt(A)*alpha
 
-    bs = np.array([b0, b1s, b2]) / a0
-    a_s = np.array([1.0, a1s/a0, a2/a0])
-    return (b1, a1), (bs, a_s)
+    bs = np.array([b0, b1s, b2], dtype=np.float32) / np.float32(a0)
+    a_s = np.array([1.0, a1s / a0, a2 / a0], dtype=np.float32)
+    out = (
+        (np.asarray(b1, dtype=np.float32), np.asarray(a1, dtype=np.float32)),
+        (bs.astype(np.float32), a_s.astype(np.float32)),
+    )
+    _K_WEIGHT_CACHE[sr] = out
+    return out
 
 def integrated_loudness_lufs(y: np.ndarray, sr: int) -> float:
     """
@@ -192,22 +310,28 @@ def integrated_loudness_lufs(y: np.ndarray, sr: int) -> float:
     yk = apply_iir(apply_iir(y, b1, a1), bs, a_s)
 
     # Sum channels with weights (stereo: 1.0 each)
-    mono = np.mean(yk, axis=1)
+    mono = np.mean(yk, axis=1, dtype=np.float32)
 
     block = int(0.400 * sr)
     hop = int(0.100 * sr)
     if block <= 0:
         return -100.0
 
-    energies = []
-    for i in range(0, max(1, len(mono) - block), hop):
-        seg = mono[i:i+block]
-        if len(seg) < block:
-            seg = np.pad(seg, (0, block - len(seg)))
-        e = np.mean(seg.astype(np.float64)**2)
-        energies.append(e)
-
-    energies = np.array(energies, dtype=np.float64)
+    x = np.ascontiguousarray(mono, dtype=np.float32)
+    if len(x) < block:
+        x = np.pad(x, (0, block - len(x)))
+    n_frames = 1 + max(0, (len(x) - block + hop - 1) // hop)
+    need = (n_frames - 1) * hop + block
+    if need > len(x):
+        x = np.pad(x, (0, need - len(x)))
+    stride = x.strides[0]
+    frames = np.lib.stride_tricks.as_strided(
+        x,
+        shape=(n_frames, block),
+        strides=(hop * stride, stride),
+        writeable=False,
+    )
+    energies = np.mean(frames.astype(np.float64, copy=False) ** 2, axis=1)
     if energies.size == 0:
         return -100.0
 
@@ -226,6 +350,92 @@ def integrated_loudness_lufs(y: np.ndarray, sr: int) -> float:
     if not np.any(keep_rel):
         return lufs_abs_mean
     return float(np.mean(lufs_blocks[keep_rel]))
+
+
+def stereo_correlation(y: np.ndarray) -> float:
+    y = ensure_stereo(np.asarray(y, dtype=np.float32))
+    l = y[:, 0].astype(np.float64, copy=False)
+    r = y[:, 1].astype(np.float64, copy=False)
+    lv = float(np.std(l))
+    rv = float(np.std(r))
+    if lv < 1e-9 or rv < 1e-9:
+        return 0.0
+    return float(np.corrcoef(l, r)[0, 1])
+
+
+def sub_band_crest_db(y: np.ndarray, sr: int, lo_hz: float = 25.0, hi_hz: float = 120.0) -> float:
+    y = ensure_stereo(np.asarray(y, dtype=np.float32))
+    b, a = butter_bandpass(lo_hz, hi_hz, sr, order=2)
+    low = sps.lfilter(b, a, y, axis=0).astype(np.float32)
+    mono = np.mean(low, axis=1, dtype=np.float32)
+    p = float(np.max(np.abs(mono)))
+    r = float(np.sqrt(np.mean(mono.astype(np.float64) ** 2) + 1e-12))
+    return float(lin_to_db(p + 1e-12) - lin_to_db(r + 1e-12))
+
+
+def verify_master(
+    y_in: np.ndarray,
+    y_out: np.ndarray,
+    sr: int,
+    *,
+    ceiling_dbfs: float,
+    epsilon_db: float = 0.05,
+    oversample: int = 4,
+) -> Tuple[Dict[str, float], List[str]]:
+    y_in = ensure_stereo(np.asarray(y_in, dtype=np.float32))
+    y_out = ensure_stereo(np.asarray(y_out, dtype=np.float32))
+
+    lufs_pre = float(integrated_loudness_lufs(y_in, sr))
+    lufs_post = float(integrated_loudness_lufs(y_out, sr))
+    tp_post = float(lin_to_db(true_peak_estimate(y_out, sr, oversample=oversample) + 1e-12))
+    crest_pre = float(sub_band_crest_db(y_in, sr))
+    crest_post = float(sub_band_crest_db(y_out, sr))
+    corr = float(stereo_correlation(y_out))
+    sample_peak = float(np.max(np.abs(y_out)))
+    has_nan = bool(np.isnan(y_out).any() or np.isinf(y_out).any())
+
+    metrics = {
+        "lufs_pre": lufs_pre,
+        "lufs_post": lufs_post,
+        "tp_post_dbfs": tp_post,
+        "tp_target_dbfs": float(ceiling_dbfs),
+        "sub_crest_pre_db": crest_pre,
+        "sub_crest_post_db": crest_post,
+        "sub_crest_delta_db": float(crest_post - crest_pre),
+        "stereo_corr": corr,
+        "sample_peak": sample_peak,
+    }
+    failures: List[str] = []
+    if has_nan:
+        failures.append("NaN/Inf detected in output audio.")
+    if sample_peak > 1.0005:
+        failures.append(f"Sample clipping detected: |x|max={sample_peak:.6f} > 1.0005")
+    if tp_post > float(ceiling_dbfs + epsilon_db):
+        failures.append(
+            f"True peak exceeded ceiling: {tp_post:.3f} dBFS > {(ceiling_dbfs + epsilon_db):.3f} dBFS"
+        )
+    if corr < -0.25:
+        failures.append(f"Stereo correlation too negative for mono compatibility: corr={corr:.3f}")
+    return metrics, failures
+
+
+def format_verify_table(metrics: Dict[str, float]) -> str:
+    return "\n".join(
+        [
+            "VERIFY SUMMARY",
+            "Metric                         Value",
+            "--------------------------------------",
+            f"{'LUFS pre':30s} {metrics['lufs_pre']:7.2f}",
+            f"{'LUFS post':30s} {metrics['lufs_post']:7.2f}",
+            f"{'True peak post dBFS':30s} {metrics['tp_post_dbfs']:7.2f}",
+            f"{'True peak target dBFS':30s} {metrics['tp_target_dbfs']:7.2f}",
+            f"{'Sub crest pre dB':30s} {metrics['sub_crest_pre_db']:7.2f}",
+            f"{'Sub crest post dB':30s} {metrics['sub_crest_post_db']:7.2f}",
+            f"{'Sub crest delta dB':30s} {metrics['sub_crest_delta_db']:7.2f}",
+            f"{'Stereo correlation':30s} {metrics['stereo_corr']:7.3f}",
+            f"{'Sample peak':30s} {metrics['sample_peak']:7.4f}",
+        ]
+    )
 
 
 
@@ -278,19 +488,19 @@ def auto_select_preset_name(features: Dict[str, float]) -> str:
     lufs = float(features.get("lufs", -16.0))
     centroid = float(features.get("centroid_hz", 2500.0))
 
-    # High crest -> preserve dynamics (hi-fi)
+    # High crest -> preserve dynamics and macro-image.
     if crest >= 12.0:
-        return "hi_fi_streaming"
+        return "cinematic"
 
-    # Already loud and dense -> club-clean style
+    # Already loud and dense -> club-focused control.
     if lufs >= -12.0 or crest <= 8.5:
-        return "club_clean"
+        return "club"
 
-    # Otherwise: competitive trap (balanced loudness + punch)
+    # Brighter material gets the forward radio contour.
     if centroid >= 2800.0:
-        return "competitive_trap"
+        return "radio_loud"
 
-    return "competitive_trap"
+    return "hi_fi_streaming"
 
 
 def auto_tune_preset(
@@ -1408,6 +1618,189 @@ def transient_sculpt(
     return y_out, info
 
 
+def _estimate_groove_grid_samples(mono: np.ndarray, sr: int, hop: int = 512) -> Tuple[Optional[float], np.ndarray]:
+    """
+    Return (tempo_bpm, beat_sample_indices). Uses librosa when available,
+    falls back to spectral-flux autocorrelation otherwise.
+    """
+    x = np.asarray(mono, dtype=np.float32)
+    if x.size < int(sr * 1.5):
+        return None, np.array([], dtype=np.int64)
+
+    if _HAS_LIBROSA and librosa is not None:
+        try:
+            onset_env = librosa.onset.onset_strength(y=x, sr=sr, hop_length=hop)  # type: ignore[union-attr]
+            tempo, beat_frames = librosa.beat.beat_track(  # type: ignore[union-attr]
+                onset_envelope=onset_env, sr=sr, hop_length=hop, units="frames"
+            )
+            beats = (np.asarray(beat_frames, dtype=np.int64) * int(hop)).astype(np.int64)
+            beats = beats[(beats >= 0) & (beats < x.size)]
+            if beats.size > 0:
+                return float(tempo), beats
+        except Exception:
+            pass
+
+    # Fallback: STFT spectral flux + autocorr tempo estimate.
+    n_fft = 2048
+    hop = int(max(128, hop))
+    f, _, Z = sps.stft(x, fs=sr, nperseg=n_fft, noverlap=n_fft - hop, boundary=None, padded=False)
+    _ = f
+    mag = np.abs(Z).astype(np.float32)
+    flux = np.maximum(np.diff(mag, axis=1), 0.0).sum(axis=0)
+    if flux.size < 8:
+        return None, np.array([], dtype=np.int64)
+    env = np.concatenate([[0.0], flux]).astype(np.float32)
+    env -= float(np.mean(env))
+    ac = np.correlate(env, env, mode="full")[env.size - 1 :]
+    fps = float(sr) / float(hop)
+    lag_min = max(1, int(fps * 60.0 / 190.0))
+    lag_max = max(lag_min + 1, int(fps * 60.0 / 70.0))
+    lag_max = min(lag_max, ac.size - 1)
+    if lag_max <= lag_min:
+        return None, np.array([], dtype=np.int64)
+    lag = int(np.argmax(ac[lag_min:lag_max]) + lag_min)
+    tempo = float(60.0 * fps / max(1, lag))
+    start = int(np.argmax(env[: max(lag, 1)]))
+    beat_frames = np.arange(start, env.size, lag, dtype=np.int64)
+    beats = (beat_frames * hop).astype(np.int64)
+    beats = beats[(beats >= 0) & (beats < x.size)]
+    return tempo, beats
+
+
+def groove_locked_transient_sculptor(
+    y: np.ndarray,
+    sr: int,
+    *,
+    amount: float = 0.32,
+    window_ms: float = 36.0,
+    boost_db: float = 2.2,
+    decay_ms: float = 5.5,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Groove-Locked Transient Sculptor:
+    - builds a beat-grid mask,
+    - applies transient sculpt in a beat-aware blend window.
+    """
+    y = ensure_stereo(np.asarray(y, dtype=np.float32))
+    amt = float(clamp(amount, 0.0, 0.8))
+    if amt <= 1e-6:
+        return y, {"enabled": False}
+
+    mono = to_mono(y)
+    tempo, beats = _estimate_groove_grid_samples(mono, sr)
+    if beats.size < 2:
+        return y, {"enabled": False, "reason": "tempo_grid_not_found"}
+
+    y_sc, tinfo = transient_sculpt(
+        y,
+        sr,
+        boost_db=float(boost_db),
+        mix=1.0,
+        decay_ms=float(decay_ms),
+    )
+
+    n = len(y)
+    win = max(16, int(sr * float(window_ms) / 1000.0))
+    shape = np.hanning(2 * win).astype(np.float32)
+    env = np.full(n, 0.08 * amt, dtype=np.float32)
+    for b in beats:
+        s0 = max(0, int(b) - win)
+        s1 = min(n, int(b) + win)
+        k0 = max(0, win - int(b))
+        k1 = k0 + (s1 - s0)
+        env[s0:s1] += shape[k0:k1] * amt
+    env = np.clip(env, 0.0, amt).astype(np.float32)
+
+    y_out = (y * (1.0 - env[:, None]) + y_sc * env[:, None]).astype(np.float32)
+    info = {
+        "enabled": True,
+        "tempo_bpm": float(tempo) if tempo is not None else None,
+        "beat_count": int(beats.size),
+        "mean_mix": float(np.mean(env)),
+        "max_mix": float(np.max(env)),
+        "transient": tinfo,
+    }
+    return y_out, info
+
+
+def sub_phase_guard2(
+    y: np.ndarray,
+    sr: int,
+    *,
+    f0_hz: Optional[float] = None,
+    strength: float = 0.42,
+    max_side_reduction: float = 0.60,
+    crest_drop_limit_db: float = 1.5,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Phase-Anchored Sub Integrity 2.0:
+    adaptive low-band side reduction with crest-preservation guard.
+    """
+    x = ensure_stereo(np.asarray(y, dtype=np.float32))
+    s = float(clamp(strength, 0.0, 1.0))
+    if s <= 1e-6:
+        return x, {"enabled": False}
+
+    if f0_hz is None or f0_hz <= 0.0:
+        f0_hz = 55.0
+    cutoff = float(clamp(1.95 * float(f0_hz), 70.0, 120.0))
+    b_lp, a_lp = sps.butter(2, cutoff / (0.5 * sr), btype="lowpass")
+
+    l = x[:, 0]
+    r = x[:, 1]
+    low_l = sps.lfilter(b_lp, a_lp, l).astype(np.float32)
+    low_r = sps.lfilter(b_lp, a_lp, r).astype(np.float32)
+    low_m = 0.5 * (low_l + low_r)
+    low_s = 0.5 * (low_l - low_r)
+
+    side_ratio = float(rms(low_s) / max(rms(low_m), 1e-9))
+    corr = 0.0
+    if np.std(low_l) > 1e-8 and np.std(low_r) > 1e-8:
+        corr = float(np.corrcoef(low_l.astype(np.float64), low_r.astype(np.float64))[0, 1])
+
+    ratio_term = float(smoothstep(side_ratio, 0.12, 0.45))
+    corr_term = float(1.0 - smoothstep(corr, 0.20, 0.85))
+    reduction = float(clamp(s * ratio_term * corr_term, 0.0, max_side_reduction))
+    if reduction <= 1e-5:
+        return x, {
+            "enabled": False,
+            "cutoff_hz": cutoff,
+            "side_ratio": side_ratio,
+            "corr": corr,
+            "reduction": reduction,
+        }
+
+    mid, side = mid_side_encode(x)
+    side_low = sps.lfilter(b_lp, a_lp, side).astype(np.float32)
+    side_hi = side - side_low
+
+    crest_pre = float(sub_band_crest_db(x, sr))
+    side_out = side_hi + side_low * (1.0 - reduction)
+    y2 = mid_side_decode(mid, side_out).astype(np.float32)
+    crest_post = float(sub_band_crest_db(y2, sr))
+    crest_drop = float(crest_pre - crest_post)
+
+    if crest_drop > float(crest_drop_limit_db):
+        safe_scale = float(clamp(float(crest_drop_limit_db) / max(crest_drop, 1e-9), 0.0, 1.0))
+        reduction *= safe_scale
+        side_out = side_hi + side_low * (1.0 - reduction)
+        y2 = mid_side_decode(mid, side_out).astype(np.float32)
+        crest_post = float(sub_band_crest_db(y2, sr))
+        crest_drop = float(crest_pre - crest_post)
+
+    info = {
+        "enabled": True,
+        "cutoff_hz": cutoff,
+        "side_ratio": side_ratio,
+        "corr": corr,
+        "reduction": float(reduction),
+        "crest_pre_db": crest_pre,
+        "crest_post_db": crest_post,
+        "crest_drop_db": crest_drop,
+    }
+    return y2, info
+
+
 # ---------------------------
 # Movement (ported from v7.3) - section-aware width modulation + optional HookLift
 # ---------------------------
@@ -1491,17 +1884,24 @@ def hooklift(
     x = ensure_stereo(y).astype(np.float32)
     mid, side = mid_side_encode(x)
 
+    # Correlation guard: if HF side is already very wide/phasey, reduce lift.
+    corr = corrcoef_band(x, sr, 2500.0, 12000.0)
+    guard = smoothstep(corr, lo=0.10, hi=0.82)
+    mix_eff = mix * (0.65 + 0.35 * guard)
+    width_gain_eff = float(width_gain) * guard
+    air_gain_eff = float(air_gain) * (0.75 + 0.25 * guard)
+
     # SIDE high-band lift (zero-phase)
     hp = float(clamp(width_hp_hz, 600.0, 6000.0))
     b, a = sps.butter(2, hp / (0.5 * sr), btype="high")
     side_hi = sps.filtfilt(b, a, side).astype(np.float32)
-    side_boosted = (side + float(width_gain) * side_hi).astype(np.float32)
+    side_boosted = (side + width_gain_eff * side_hi).astype(np.float32)
 
     # Air shelf approx: high-pass the MID and add back
     air_hz = float(clamp(air_hz, 4000.0, 16000.0))
     b2, a2 = sps.butter(2, air_hz / (0.5 * sr), btype="high")
     air = sps.filtfilt(b2, a2, mid).astype(np.float32)
-    mid_air = (mid + float(air_gain) * air).astype(np.float32)
+    mid_air = (mid + air_gain_eff * air).astype(np.float32)
 
     # Shimmer: soft saturation on the air band
     drv = float(clamp(shimmer_drive, 1.0, 3.0))
@@ -1509,8 +1909,18 @@ def hooklift(
     mid_air2 = (mid_air + float(shimmer_mix) * air_sat).astype(np.float32)
 
     lifted = mid_side_decode(mid_air2, side_boosted).astype(np.float32)
-    y_out = (1.0 - mix) * x + mix * lifted
-    return y_out.astype(np.float32), {"enabled": True, "mix": mix, "air_hz": air_hz, "width_gain": float(width_gain), "air_gain": float(air_gain)}
+    y_out = ((1.0 - mix_eff) * x + mix_eff * lifted).astype(np.float32)
+    y_out = gain_match_rms(y_out, x)
+    return y_out.astype(np.float32), {
+        "enabled": True,
+        "mix": float(mix_eff),
+        "mix_requested": float(mix),
+        "guard": float(guard),
+        "corr_hi": float(corr),
+        "air_hz": air_hz,
+        "width_gain": float(width_gain_eff),
+        "air_gain": float(air_gain_eff),
+    }
 
 def mono_sub_v2(y: np.ndarray, sr: int,
                 f0_hz: Optional[float],
@@ -1535,15 +1945,18 @@ def mono_sub_v2(y: np.ndarray, sr: int,
 
     # adaptive mix: only increase mono strength if low stereo is unstable
     # Typical range: 0.45–0.72 (not 0.85)
-    add = 0.55 * smoothstep(ratio, lo=0.10, hi=0.35)
-    mono_mix = clamp(0.45 + add, 0.45, 0.69)
+    base = clamp(float(base_mix), 0.35, 0.68)
+    add = 0.22 * smoothstep(ratio, lo=0.10, hi=0.35)
+    mono_mix = clamp(base + add, 0.35, 0.84)
 
     # apply: high-pass SIDE below cutoff (monoizing the sub)
     b_hp, a_hp = butter_highpass(cutoff, sr, order=2)
     side_hp = sps.lfilter(b_hp, a_hp, side).astype(np.float32)
 
     # blend: keep some original side for vibe but protect sub
-    side_out = side_hp * (1.0 - mono_mix) + side * mono_mix
+    # mono_mix = amount of protected (high-passed) SIDE retained in sub band.
+    # Higher mono_mix means stronger sub mono anchoring.
+    side_out = side_hp * mono_mix + side * (1.0 - mono_mix)
     return mid_side_decode(mid, side_out), cutoff, mono_mix
 
 
@@ -1752,6 +2165,18 @@ class Preset:
     transient_sculpt_crest_guard_db: float = 17.5
     transient_sculpt_decay_ms: float = 5.5
 
+    # Innovation 1: Groove-Locked Transient Sculptor (default off)
+    enable_groove_sculpt: bool = False
+    groove_sculpt_amount: float = 0.32
+    groove_sculpt_window_ms: float = 36.0
+    groove_sculpt_boost_db: float = 2.2
+
+    # Innovation 2: Phase-Anchored Sub Integrity 2.0 (default off)
+    enable_sub_phase_guard2: bool = False
+    sub_phase_guard2_strength: float = 0.42
+    sub_phase_guard2_max_side_reduction: float = 0.60
+    sub_phase_guard2_crest_drop_limit_db: float = 1.5
+
     # Analog Warmth (tilt EQ)
     warmth: float = 0.0
 
@@ -1761,45 +2186,116 @@ class Preset:
     governor_step_db: float = -0.6      # reduce loudness target by 0.6 dB per iteration
 
 def get_presets() -> Dict[str, Preset]:
+    # hi_fi_streaming:
+    #   Diatonic-translation curve with restrained loudness, preserving interval clarity and depth.
+    hi_fi_streaming = Preset(
+        name="hi_fi_streaming",
+        target_lufs=-12.8,
+        match_strength=0.67,
+        hi_factor=0.80,
+        max_eq_db=5.4,
+        eq_smooth_hz=112.0,
+        width_mid=1.05,
+        width_hi=1.24,
+        microshift_ms=0.20,
+        microshift_mix=0.15,
+        hooklift_mix=0.20,
+        movement_amount=0.09,
+        transient_sculpt_boost_db=2.3,
+        transient_sculpt_mix=0.36,
+        governor_gr_limit_db=-1.2,
+    )
+
+    # radio_loud:
+    #   Presence-forward voicing optimized for vocal/chord intelligibility and stable punch.
+    radio_loud = Preset(
+        name="radio_loud",
+        target_lufs=-11.2,
+        match_strength=0.62,
+        hi_factor=0.77,
+        max_eq_db=5.9,
+        eq_smooth_hz=98.0,
+        width_mid=1.06,
+        width_hi=1.29,
+        microshift_ms=0.23,
+        microshift_mix=0.19,
+        deess_threshold_db=-19.0,
+        deess_ratio=3.4,
+        glow_drive_db=1.10,
+        glow_mix=0.58,
+        limiter_attack_ms=0.8,
+        limiter_release_ms=54.0,
+        governor_gr_limit_db=-1.5,
+        transient_sculpt_boost_db=2.6,
+        transient_sculpt_mix=0.40,
+    )
+
+    # cinematic:
+    #   Wider M/S geometry, longer micro-movement and dynamic headroom for harmonic narrative arcs.
+    cinematic = Preset(
+        name="cinematic",
+        target_lufs=-13.6,
+        match_strength=0.73,
+        hi_factor=0.84,
+        max_eq_db=4.9,
+        eq_smooth_hz=132.0,
+        width_mid=1.09,
+        width_hi=1.40,
+        microshift_ms=0.30,
+        microshift_mix=0.24,
+        hooklift_mix=0.18,
+        movement_amount=0.14,
+        microdetail_amount=0.26,
+        microdetail_threshold_db=-36.0,
+        microdetail_max_boost_db=3.2,
+        transient_sculpt_boost_db=2.1,
+        transient_sculpt_mix=0.30,
+        governor_gr_limit_db=-0.95,
+        governor_allow_above_db=-0.1,
+    )
+
+    # club:
+    #   Rhythmic low-end precision with beat-locked transient focus and sub phase anchoring.
+    club = Preset(
+        name="club",
+        target_lufs=-10.6,
+        match_strength=0.58,
+        hi_factor=0.72,
+        max_eq_db=6.1,
+        eq_smooth_hz=92.0,
+        width_mid=1.06,
+        width_hi=1.31,
+        microshift_ms=0.25,
+        microshift_mix=0.17,
+        mono_sub_base_mix=0.64,
+        enable_sub_phase_guard2=True,
+        sub_phase_guard2_strength=0.58,
+        sub_phase_guard2_max_side_reduction=0.72,
+        sub_phase_guard2_crest_drop_limit_db=1.0,
+        enable_groove_sculpt=True,
+        groove_sculpt_amount=0.30,
+        groove_sculpt_window_ms=32.0,
+        groove_sculpt_boost_db=2.4,
+        transient_sculpt_boost_db=2.8,
+        transient_sculpt_mix=0.42,
+        limiter_lookahead_ms=2.6,
+        limiter_stereo_link=0.95,
+        softclip_mix=0.32,
+        softclip_drive_db=1.5,
+        governor_gr_limit_db=-1.8,
+    )
+
+    # Legacy compatibility aliases retain behavior for existing scripts/jobs.
+    competitive_trap = replace(radio_loud, name="competitive_trap")
+    club_clean = replace(club, name="club_clean")
+
     return {
-        "hi_fi_streaming": Preset(
-            name="hi_fi_streaming",
-            target_lufs=-12.8,
-            match_strength=0.68,
-            hi_factor=0.78,
-            max_eq_db=5.6,
-            eq_smooth_hz=110.0,
-            width_mid=1.05,
-            width_hi=1.26,
-            microshift_ms=0.20,
-            microshift_mix=0.16,
-        ),
-        "competitive_trap": Preset(
-            name="competitive_trap",
-            target_lufs=-11.4,
-            match_strength=0.62,
-            hi_factor=0.75,
-            max_eq_db=6.2,
-            eq_smooth_hz=95.0,
-            width_mid=1.07,
-            width_hi=1.30,
-            microshift_ms=0.24,
-            microshift_mix=0.20,
-            governor_gr_limit_db=-1.4,
-        ),
-        "club_clean": Preset(
-            name="club_clean",
-            target_lufs=-10.4,
-            match_strength=0.56,
-            hi_factor=0.70,
-            max_eq_db=6.0,
-            eq_smooth_hz=90.0,
-            width_mid=1.06,
-            width_hi=1.28,
-            microshift_ms=0.26,
-            microshift_mix=0.18,
-            governor_gr_limit_db=-1.6,
-        ),
+        "hi_fi_streaming": hi_fi_streaming,
+        "radio_loud": radio_loud,
+        "cinematic": cinematic,
+        "club": club,
+        "competitive_trap": competitive_trap,
+        "club_clean": club_clean,
     }
 
 def load_audio(path: str) -> Tuple[np.ndarray, int]:
@@ -1876,235 +2372,275 @@ def master(target_path: str, out_path: str, preset: Preset,
            *,
            out_subtype: Optional[str] = None,
            dither: Optional[bool] = None,
-           dither_seed: int = 0) -> Dict[str, Any]:
+           dither_seed: int = 0,
+           profile: bool = False,
+           verify: bool = False,
+           verify_epsilon_db: float = 0.05) -> Dict[str, Any]:
 
+    prof = Profiler(enabled=bool(profile))
     t0 = time.time()
-    _stage_t = time.time()
-
+    out_path_p = Path(out_path)
+    report_path_p = Path(report_path) if report_path else (out_path_p.parent / "report.json")
     log.info("[master] preset=%s  target=%s  reference=%s", preset.name, target_path, reference_path)
 
-    y_t, sr_t = load_audio(target_path)
-    y_t = ensure_stereo(y_t)
-    if sr_t != preset.sr:
-        y_t = resample_audio(y_t, sr_t, preset.sr)
-        sr_t = preset.sr
+    with prof.stage("io"):
+        y_t, sr_t = load_audio(target_path)
+        y_t = ensure_stereo(y_t)
+        y_r: Optional[np.ndarray] = None
+        sr_r = None
+        if reference_path:
+            y_r, sr_r = load_audio(reference_path)
+            y_r = ensure_stereo(y_r)
 
-    y_r = None
-    if reference_path:
-        y_r, sr_r = load_audio(reference_path)
-        y_r = ensure_stereo(y_r)
-        if sr_r != preset.sr:
+    with prof.stage("resample"):
+        if sr_t != preset.sr:
+            y_t = resample_audio(y_t, sr_t, preset.sr)
+            sr_t = preset.sr
+        if y_r is not None and sr_r is not None and sr_r != preset.sr:
             y_r = resample_audio(y_r, sr_r, preset.sr)
 
-    log.info("[master] audio loaded  sr=%d  dur=%.1fs  (%.3fs)", sr_t, len(y_t) / sr_t, time.time() - _stage_t)
+    y_pre_verify = y_t.copy()
+    log.info("[master] audio loaded sr=%d dur=%.1fs", sr_t, len(y_t) / sr_t)
 
-    # Safety HPF (DC + rumble)
-    b, a = butter_highpass(20.0, sr_t, order=2)
-    y = apply_iir(y_t, b, a)
+    # Safety HPF (DC + rumble).
+    y = apply_iir(y_t, *butter_highpass(20.0, sr_t, order=2))
 
-    # ---------------------------------------------------------------------
-    # HT-Demucs stem separation (EARLY) + stem-aware pre-pass + recombine
-    # ---------------------------------------------------------------------
     stems_info: Dict[str, Any] = {"enabled": False}
-    if preset.enable_stem_separation:
-        if not _HAS_DEMUCS:
-            stems_info = {"enabled": False, "reason": "demucs_not_installed"}
-        else:
-            try:
-                pre_stem_ref = y.copy()
-                stems, stems_info = demucs_separate_stems(
-                    y, sr_t,
-                    model_name=str(preset.demucs_model),
-                    device=str(preset.demucs_device),
-                    split=bool(preset.demucs_split),
-                    overlap=float(preset.demucs_overlap),
-                    shifts=int(preset.demucs_shifts),
-                )
+    with prof.stage("dynamics"):
+        if preset.enable_stem_separation:
+            if not _HAS_DEMUCS:
+                stems_info = {"enabled": False, "reason": "demucs_not_installed"}
+            else:
+                try:
+                    pre_stem_ref = y.copy()
+                    stems, stems_info = demucs_separate_stems(
+                        y,
+                        sr_t,
+                        model_name=str(preset.demucs_model),
+                        device=str(preset.demucs_device),
+                        split=bool(preset.demucs_split),
+                        overlap=float(preset.demucs_overlap),
+                        shifts=int(preset.demucs_shifts),
+                    )
+                    stems_pp: Dict[str, np.ndarray] = {}
+                    for s_name, s_audio in stems.items():
+                        stems_pp[s_name] = stem_pre_master_pass(s_audio, sr_t, s_name, preset)
+                    y_stem = np.zeros_like(pre_stem_ref, dtype=np.float32)
+                    for s_audio in stems_pp.values():
+                        y_stem += ensure_stereo(s_audio).astype(np.float32)
+                    y = gain_match_rms(y_stem, pre_stem_ref)
+                except Exception as exc:
+                    stems_info = {"enabled": False, "error": str(exc)}
 
-                stems_pp: Dict[str, np.ndarray] = {}
-                for s_name, s_audio in stems.items():
-                    stems_pp[s_name] = stem_pre_master_pass(s_audio, sr_t, s_name, preset)
+    with prof.stage("analysis"):
+        f0 = estimate_sub_fundamental_hz(y, sr_t)
 
-                y_stem = np.zeros_like(pre_stem_ref, dtype=np.float32)
-                for s_audio in stems_pp.values():
-                    y_stem += ensure_stereo(s_audio).astype(np.float32)
-
-                y = gain_match_rms(y_stem, pre_stem_ref)
-
-            except Exception as e:
-                stems_info = {"enabled": False, "error": str(e)}
-
-    # Musical analysis: sub f0
-    f0 = estimate_sub_fundamental_hz(y, sr_t)
-
-    # Mono-Sub v2
     mono_cut = None
     mono_mix = None
-    if preset.enable_mono_sub_v2:
-        y, mono_cut, mono_mix = mono_sub_v2(y, sr_t, f0, base_mix=preset.mono_sub_base_mix)
+    with prof.stage("dynamics"):
+        if preset.enable_mono_sub_v2:
+            y, mono_cut, mono_mix = mono_sub_v2(y, sr_t, f0, base_mix=preset.mono_sub_base_mix)
 
-    # Match EQ (reference or translation curve)
-    _stage_t = time.time()
-    freqs, eq_db = match_eq_curve(
-        reference=y_r, target=y, sr=sr_t,
-        max_eq_db=preset.max_eq_db,
-        eq_smooth_hz=preset.eq_smooth_hz,
-        match_strength=preset.match_strength,
-        hi_factor=preset.hi_factor
-    )
-    fir = design_fir_from_eq(freqs, eq_db, sr_t, preset.fir_taps)
-    fir_mode = str(getattr(preset, "fir_streaming", "auto")).lower()
-    if fir_mode == "off":
-        out = np.zeros_like(y, dtype=np.float32)
-        for ch in range(2):
-            out[:, ch] = fftconvolve(y[:, ch], fir, mode="same").astype(np.float32)
-        y = out
-    elif fir_mode == "on":
-        y = apply_fir_streaming_overlap_save(y, fir, sr=sr_t, mode="same", block_pow2=int(getattr(preset, "fir_block_pow2", 17)))
-    else:
-        y = apply_fir(y, fir, sr_t, mode="same")
-    log.info("[master] match-EQ + FIR convolution (%s)  (%.3fs)", fir_mode, time.time() - _stage_t)
-
-
-    # Analog Warmth
-    if getattr(preset, "warmth", 0.0) > 0.0:
-        y = apply_warmth_tilt(y, sr_t, amount=float(preset.warmth))
-
-
-
-    # Dynamic masking EQ
-    if preset.enable_masking_eq:
-        y = dynamic_masking_eq(y, sr_t, max_dip_db=1.5)
-
-    # De-ess (protect harshness without killing air)
-    if preset.enable_deess:
-        y = de_ess(y, sr_t, threshold_db=preset.deess_threshold_db, ratio=preset.deess_ratio, mix=preset.deess_mix)
-
-    # Harmonic glow (midrange polish)
-    if preset.enable_glow:
-        y = harmonic_glow(y, sr_t, drive_db=preset.glow_drive_db, mix=preset.glow_mix)
-
-    # Stereo: spatial realism enhancer
-    _stage_t = time.time()
-    if preset.enable_spatial:
-        y = spatial_realism_enhancer(y, sr_t, width_mid=preset.width_mid, width_hi=preset.width_hi)
-
-    # Stereo: NEW microshift CGMS
-    if preset.enable_microshift:
-        y = microshift_widen_side(y, sr_t, shift_ms=preset.microshift_ms, mix=preset.microshift_mix)
-    log.info("[master] stereo enhancements  (%.3fs)", time.time() - _stage_t)
+    with prof.stage("fir_match_eq"):
+        freqs, eq_db = match_eq_curve(
+            reference=y_r,
+            target=y,
+            sr=sr_t,
+            max_eq_db=preset.max_eq_db,
+            eq_smooth_hz=preset.eq_smooth_hz,
+            match_strength=preset.match_strength,
+            hi_factor=preset.hi_factor,
+        )
+        fir = design_fir_from_eq(freqs, eq_db, sr_t, preset.fir_taps)
+        fir_mode = str(getattr(preset, "fir_streaming", "auto")).lower()
+        if fir_mode == "off":
+            out = np.zeros_like(y, dtype=np.float32)
+            for ch in range(2):
+                out[:, ch] = fftconvolve(y[:, ch], fir, mode="same").astype(np.float32)
+            y = out
+        elif fir_mode == "on":
+            y = apply_fir_streaming_overlap_save(
+                y,
+                fir,
+                sr=sr_t,
+                mode="same",
+                block_pow2=int(getattr(preset, "fir_block_pow2", 17)),
+            )
+        else:
+            y = apply_fir(y, fir, sr_t, mode="same")
 
     microdetail_info: Dict[str, Any] = {"enabled": False}
-    if getattr(preset, "enable_microdetail", False):
-        _stage_t = time.time()
-        y, md = microdetail_recovery_side_high(
-            y, sr_t,
-            band_lo_hz=float(getattr(preset, "microdetail_band_lo_hz", 2500.0)),
-            band_hi_hz=float(getattr(preset, "microdetail_band_hi_hz", 12000.0)),
-            threshold_db=float(getattr(preset, "microdetail_threshold_db", -34.0)),
-            max_boost_db=float(getattr(preset, "microdetail_max_boost_db", 3.5)),
-            amount=float(getattr(preset, "microdetail_amount", 0.22)),
-            mix=float(getattr(preset, "microdetail_mix", 0.65)),
-        )
-        microdetail_info = md
-        log.info("[master] microdetail recovery  (%.3fs)", time.time() - _stage_t)
-
-    # ---------------------------------------------------------------------
-    # Movement + HookLift (section-aware)
-    # ---------------------------------------------------------------------
     movement_info: Dict[str, Any] = {"enabled": False}
     hooklift_info: Dict[str, Any] = {"enabled": False}
-
-    if preset.enable_movement:
-        y, movement_info = movement_automation(y, sr_t, amount=float(preset.movement_amount))
-
-    if preset.enable_hooklift:
-        if bool(preset.hooklift_auto):
-            mask = build_section_lift_mask(
-                y, sr_t,
-                percentile=float(preset.hooklift_auto_percentile),
-            )
-            lifted, hinfo = hooklift(y, sr_t, mix=float(preset.hooklift_mix))
-            mask_col = mask[:, None]
-            y = (1.0 - mask_col) * y + mask_col * lifted
-            hooklift_info = {**hinfo, "auto": True, "auto_percentile": float(preset.hooklift_auto_percentile)}
-        else:
-            y, hooklift_info = hooklift(y, sr_t, mix=float(preset.hooklift_mix))
-
-    # Transient Sculpt (pre-limiter punch preservation)
     transient_info: Dict[str, Any] = {"enabled": False}
-    if getattr(preset, "enable_transient_sculpt", True):
-        _stage_t = time.time()
-        y, transient_info = transient_sculpt(
-            y, sr_t,
-            boost_db=float(getattr(preset, "transient_sculpt_boost_db", 2.4)),
-            mix=float(getattr(preset, "transient_sculpt_mix", 0.38)),
-            crest_guard_db=float(getattr(preset, "transient_sculpt_crest_guard_db", 17.5)),
-            decay_ms=float(getattr(preset, "transient_sculpt_decay_ms", 5.5)),
+    groove_info: Dict[str, Any] = {"enabled": False}
+    sub_guard2_info: Dict[str, Any] = {"enabled": False}
+
+    with prof.stage("dynamics"):
+        if getattr(preset, "warmth", 0.0) > 0.0:
+            y = apply_warmth_tilt(y, sr_t, amount=float(preset.warmth))
+
+        if preset.enable_masking_eq:
+            y = dynamic_masking_eq(y, sr_t, max_dip_db=1.5)
+        if preset.enable_deess:
+            y = de_ess(
+                y,
+                sr_t,
+                threshold_db=preset.deess_threshold_db,
+                ratio=preset.deess_ratio,
+                mix=preset.deess_mix,
+            )
+        if preset.enable_glow:
+            y = harmonic_glow(y, sr_t, drive_db=preset.glow_drive_db, mix=preset.glow_mix)
+        if preset.enable_spatial:
+            y = spatial_realism_enhancer(y, sr_t, width_mid=preset.width_mid, width_hi=preset.width_hi)
+        if preset.enable_microshift:
+            y = microshift_widen_side(y, sr_t, shift_ms=preset.microshift_ms, mix=preset.microshift_mix)
+        if getattr(preset, "enable_microdetail", False):
+            y, md = microdetail_recovery_side_high(
+                y,
+                sr_t,
+                band_lo_hz=float(getattr(preset, "microdetail_band_lo_hz", 2500.0)),
+                band_hi_hz=float(getattr(preset, "microdetail_band_hi_hz", 12000.0)),
+                threshold_db=float(getattr(preset, "microdetail_threshold_db", -34.0)),
+                max_boost_db=float(getattr(preset, "microdetail_max_boost_db", 3.5)),
+                amount=float(getattr(preset, "microdetail_amount", 0.22)),
+                mix=float(getattr(preset, "microdetail_mix", 0.65)),
+            )
+            microdetail_info = md
+        if preset.enable_movement:
+            y, movement_info = movement_automation(y, sr_t, amount=float(preset.movement_amount))
+        if preset.enable_hooklift:
+            if bool(preset.hooklift_auto):
+                mask = build_section_lift_mask(
+                    y,
+                    sr_t,
+                    percentile=float(preset.hooklift_auto_percentile),
+                )
+                lifted, hinfo = hooklift(y, sr_t, mix=float(preset.hooklift_mix))
+                mask_col = mask[:, None]
+                y = (1.0 - mask_col) * y + mask_col * lifted
+                hooklift_info = {
+                    **hinfo,
+                    "auto": True,
+                    "auto_percentile": float(preset.hooklift_auto_percentile),
+                }
+            else:
+                y, hooklift_info = hooklift(y, sr_t, mix=float(preset.hooklift_mix))
+        if getattr(preset, "enable_transient_sculpt", True):
+            y, transient_info = transient_sculpt(
+                y,
+                sr_t,
+                boost_db=float(getattr(preset, "transient_sculpt_boost_db", 2.4)),
+                mix=float(getattr(preset, "transient_sculpt_mix", 0.38)),
+                crest_guard_db=float(getattr(preset, "transient_sculpt_crest_guard_db", 17.5)),
+                decay_ms=float(getattr(preset, "transient_sculpt_decay_ms", 5.5)),
+            )
+        if bool(getattr(preset, "enable_groove_sculpt", False)):
+            y, groove_info = groove_locked_transient_sculptor(
+                y,
+                sr_t,
+                amount=float(getattr(preset, "groove_sculpt_amount", 0.32)),
+                window_ms=float(getattr(preset, "groove_sculpt_window_ms", 36.0)),
+                boost_db=float(getattr(preset, "groove_sculpt_boost_db", 2.2)),
+                decay_ms=float(getattr(preset, "transient_sculpt_decay_ms", 5.5)),
+            )
+        if bool(getattr(preset, "enable_sub_phase_guard2", False)):
+            y, sub_guard2_info = sub_phase_guard2(
+                y,
+                sr_t,
+                f0_hz=f0,
+                strength=float(getattr(preset, "sub_phase_guard2_strength", 0.42)),
+                max_side_reduction=float(getattr(preset, "sub_phase_guard2_max_side_reduction", 0.60)),
+                crest_drop_limit_db=float(getattr(preset, "sub_phase_guard2_crest_drop_limit_db", 1.5)),
+            )
+
+    with prof.stage("limiter_governor"):
+        pre_lufs = integrated_loudness_lufs(y, sr_t)
+        base_lufs = float(pre_lufs)
+
+        def _render_at(target_lufs: float) -> Tuple[np.ndarray, Dict[str, float]]:
+            gain_db = float(target_lufs - base_lufs)
+            y_norm = (y * db_to_lin(gain_db)).astype(np.float32)
+            cur_lufs = base_lufs
+            y_lim, lim_stats = peak_control_chain(y_norm, sr_t, preset)
+            post = integrated_loudness_lufs(y_lim, sr_t)
+            lim_stats = {
+                **lim_stats,
+                "target_lufs": float(target_lufs),
+                "pre_lufs": float(cur_lufs),
+                "post_lufs": float(post),
+                "gain_db": float(gain_db),
+            }
+            return y_lim, lim_stats
+
+        allow_above = float(getattr(preset, "governor_allow_above_db", 0.0))
+        high = float(preset.target_lufs + allow_above)
+        low = float(preset.target_lufs + preset.governor_step_db * max(1, int(preset.governor_iters)))
+        if low > high:
+            low, high = high, low
+
+        best_audio: Optional[np.ndarray] = None
+        best_stats: Optional[Dict[str, float]] = None
+        lo, hi = low, high
+        steps = int(getattr(preset, "governor_search_steps", 11))
+        for _ in range(steps):
+            mid = 0.5 * (lo + hi)
+            cand_audio, cand_stats = _render_at(mid)
+            ok_gr = float(cand_stats.get("min_gain_db", -999.0)) > float(preset.governor_gr_limit_db)
+            ok_tp = float(cand_stats.get("tp_dbfs", 0.0)) <= float(preset.ceiling_dbfs + 0.10)
+            if ok_gr and ok_tp:
+                best_audio, best_stats = cand_audio, cand_stats
+                lo = mid
+            else:
+                hi = mid
+        if best_audio is None or best_stats is None:
+            best_audio, best_stats = _render_at(low)
+
+        y = best_audio
+        governor_target = float(best_stats.get("target_lufs", preset.target_lufs))
+        final_gr_db = float(best_stats.get("min_gain_db", 0.0))
+        post_lufs = float(best_stats.get("post_lufs", integrated_loudness_lufs(y, sr_t)))
+        tp = float(
+            best_stats.get(
+                "tp_dbfs",
+                lin_to_db(true_peak_estimate(y, sr_t, oversample=preset.limiter_oversample) + 1e-12),
+            )
         )
-        log.info("[master] transient sculpt  enabled=%s  (%.3fs)", transient_info.get("enabled", False), time.time() - _stage_t)
 
-    # Loudness Governor v2 (binary search) + final peak control chain (softclip + TP limiter)
-    _stage_t = time.time()
-    pre_lufs = integrated_loudness_lufs(y, sr_t)
+    verify_metrics: Optional[Dict[str, float]] = None
+    verify_failures: List[str] = []
+    if verify:
+        verify_metrics, verify_failures = verify_master(
+            y_pre_verify,
+            y,
+            sr_t,
+            ceiling_dbfs=float(preset.ceiling_dbfs),
+            epsilon_db=float(verify_epsilon_db),
+            oversample=int(preset.limiter_oversample),
+        )
+        print(format_verify_table(verify_metrics))
+        if verify_failures:
+            print("VERIFY FAILURES")
+            for msg in verify_failures:
+                print(f"- {msg}")
 
-    def _render_at(target_lufs: float) -> Tuple[np.ndarray, Dict[str, float]]:
-        y_norm, cur_lufs, gain_db = apply_lufs_gain(y, sr_t, target_lufs)
-        y_lim, lim_stats = peak_control_chain(y_norm, sr_t, preset)
-        post = integrated_loudness_lufs(y_lim, sr_t)
-        lim_stats = {
-            **lim_stats,
-            "target_lufs": float(target_lufs),
-            "pre_lufs": float(cur_lufs),
-            "post_lufs": float(post),
-            "gain_db": float(gain_db),
-        }
-        return y_lim, lim_stats
-
-    allow_above = float(getattr(preset, "governor_allow_above_db", 0.0))
-    high = float(preset.target_lufs + allow_above)
-    low = float(preset.target_lufs + preset.governor_step_db * max(1, int(preset.governor_iters)))
-    if low > high:
-        low, high = high, low
-
-    best_audio: Optional[np.ndarray] = None
-    best_stats: Optional[Dict[str, float]] = None
-    lo, hi = low, high
-    steps = int(getattr(preset, "governor_search_steps", 11))
-
-    for _ in range(steps):
-        mid = 0.5 * (lo + hi)
-        cand_audio, cand_stats = _render_at(mid)
-
-        ok_gr = float(cand_stats.get("min_gain_db", -999.0)) > float(preset.governor_gr_limit_db)
-        ok_tp = float(cand_stats.get("tp_dbfs", 0.0)) <= float(preset.ceiling_dbfs + 0.10)
-
-        if ok_gr and ok_tp:
-            best_audio, best_stats = cand_audio, cand_stats
-            lo = mid  # try louder (closer to high)
-        else:
-            hi = mid  # back off
-
-    if best_audio is None or best_stats is None:
-        best_audio, best_stats = _render_at(low)
-
-    y = best_audio
-    governor_target = float(best_stats.get("target_lufs", preset.target_lufs))
-    final_gr_db = float(best_stats.get("min_gain_db", 0.0))
-    post_lufs = float(best_stats.get("post_lufs", integrated_loudness_lufs(y, sr_t)))
-    tp = float(best_stats.get("tp_dbfs", lin_to_db(true_peak_estimate(y, sr_t, oversample=preset.limiter_oversample) + 1e-12)))
-
-    if out_subtype is None:
-        out_subtype = "PCM_24" if str(out_path).lower().endswith(".wav") else None
-    write_audio(out_path, y, sr_t, subtype=out_subtype, dither=dither, dither_seed=int(dither_seed))
-    log.info("[master] governor + limiter + write  LUFS=%.1f  TP=%.2f dBFS  GR=%.2f dB  (%.3fs)",
-             post_lufs, tp, final_gr_db, time.time() - _stage_t)
-    log.info("[master] TOTAL runtime=%.2fs  out=%s", time.time() - t0, out_path)
+    with prof.stage("export"):
+        if out_subtype is None:
+            out_subtype = "PCM_24" if str(out_path_p).lower().endswith(".wav") else None
+        write_audio(
+            str(out_path_p),
+            y,
+            sr_t,
+            subtype=out_subtype,
+            dither=dither,
+            dither_seed=int(dither_seed),
+        )
 
     result = {
         "preset": preset.name,
         "sr": sr_t,
-        "target_lufs_requested": preset.target_lufs,
+        "target_lufs_requested": float(preset.target_lufs),
         "governor_target_lufs": float(governor_target),
         "governor_steps": int(steps),
         "governor_gr_limit_db": float(preset.governor_gr_limit_db),
@@ -2113,21 +2649,154 @@ def master(target_path: str, out_path: str, preset: Preset,
         "true_peak_dbfs": float(tp),
         "limiter_mode": str(getattr(preset, "limiter_mode", "v2")),
         "limiter_min_gain_db": float(final_gr_db),
-        "limiter_avg_gr_db": float(best_stats.get("avg_gr_db", 0.0)) if "best_stats" in locals() and best_stats is not None else None,
+        "limiter_avg_gr_db": float(best_stats.get("avg_gr_db", 0.0)) if best_stats is not None else None,
         "sub_f0_hz": float(f0) if f0 is not None else None,
         "mono_sub_cutoff_hz": float(mono_cut) if mono_cut is not None else None,
         "mono_sub_mix": float(mono_mix) if mono_mix is not None else None,
-
         "microdetail": microdetail_info,
         "movement": movement_info,
         "hooklift": hooklift_info,
         "stems": stems_info,
         "transient_sculpt": transient_info,
+        "groove_sculpt": groove_info,
+        "sub_phase_guard2": sub_guard2_info,
+        "resampler_usage": dict(_RESAMPLE_BACKEND_COUNTS),
         "runtime_sec": float(time.time() - t0),
-        "out_path": out_path,
+        "out_path": str(out_path_p),
+        "report_path": str(report_path_p),
     }
-    report_path = out_path.parent / "report.json"
-    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if prof.enabled:
+        result["profile"] = {
+            "stage_sec": {k: float(v) for k, v in prof.stage_sec.items()},
+            "peak_rss_mb": float(prof.peak_rss_mb),
+        }
+        print(prof.summary_table())
+    if verify_metrics is not None:
+        result["verify"] = verify_metrics
+        result["verify_failures"] = verify_failures
+        result["verify_passed"] = len(verify_failures) == 0
+
+    report_path_p.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    log.info(
+        "[master] done LUFS=%.2f TP=%.2f dBFS GR=%.2f dB runtime=%.2fs",
+        post_lufs,
+        tp,
+        final_gr_db,
+        time.time() - t0,
+    )
+    return result
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    presets = sorted(get_presets().keys())
+    p = argparse.ArgumentParser(description="AuralMind Match Maestro v7.3 expert pipeline")
+    p.add_argument("--target", required=True, help="Input target audio path")
+    p.add_argument("--out", required=True, help="Output mastered audio path")
+    p.add_argument("--reference", default=None, help="Optional reference track path")
+    p.add_argument("--report", default=None, help="Optional report JSON output path")
+    p.add_argument("--preset", default="hi_fi_streaming", choices=presets, help="Mastering preset")
+
+    p.add_argument("--target-lufs", type=float, default=None, help="Override preset loudness target")
+    p.add_argument("--true-peak-ceiling", type=float, default=None, help="Override TP ceiling dBFS")
+    p.add_argument("--warmth", type=float, default=None, help="Analog warmth (0..1 or 0..100)")
+
+    # Existing backend flags - preserve behavior.
+    p.add_argument("--enable-mono-sub", action="store_true", help="Enable mono-sub processing")
+    p.add_argument("--enable-masking-dynamic-eq", action="store_true", help="Enable masking-aware dynamic EQ")
+    p.add_argument("--enable-truepeak-limiter", action="store_true", help="Force true-peak limiter mode")
+
+    # New optional modes.
+    p.add_argument("--profile", action="store_true", help="Print per-stage wall-time + peak RAM estimate")
+    p.add_argument("--verify", action="store_true", help="Run objective post-master verification checks")
+    p.add_argument("--verify-epsilon-db", type=float, default=0.05, help="Verify TP epsilon over ceiling")
+
+    # Innovation flags (default off).
+    p.add_argument("--enable-groove-sculpt", action="store_true", help="Enable groove-locked transient sculptor")
+    p.add_argument("--groove-sculpt-amount", type=float, default=None, help="Groove sculpt intensity (0..1)")
+    p.add_argument("--enable-sub-phase-guard2", action="store_true", help="Enable sub phase guard 2.0")
+    p.add_argument("--sub-phase-guard2-strength", type=float, default=None, help="Sub phase guard strength (0..1)")
+
+    p.add_argument("--out-subtype", default=None, help="Optional soundfile subtype (e.g., PCM_24)")
+    p.add_argument("--dither", action="store_true", help="Force TPDF dither on PCM exports")
+    p.add_argument("--no-dither", action="store_true", help="Disable dither even for PCM exports")
+    p.add_argument("--dither-seed", type=int, default=0, help="Dither RNG seed")
+    p.add_argument("--log-level", default="INFO", help="Logging level (DEBUG/INFO/WARN/ERROR)")
+    return p
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    presets = get_presets()
+    if args.preset not in presets:
+        parser.error(f"Unknown preset: {args.preset}")
+    preset = presets[args.preset]
+
+    if args.target_lufs is not None:
+        preset = replace(preset, target_lufs=float(args.target_lufs))
+    if args.true_peak_ceiling is not None:
+        preset = replace(preset, ceiling_dbfs=float(args.true_peak_ceiling))
+    if args.warmth is not None:
+        w = float(args.warmth)
+        if w > 1.0:
+            w = w / 100.0
+        preset = replace(preset, warmth=float(clamp(w, 0.0, 1.0)))
+
+    if args.enable_mono_sub:
+        preset = replace(preset, enable_mono_sub_v2=True)
+    if args.enable_masking_dynamic_eq:
+        preset = replace(preset, enable_masking_eq=True)
+    if args.enable_truepeak_limiter:
+        preset = replace(preset, limiter_mode="v2")
+
+    if args.enable_groove_sculpt:
+        preset = replace(preset, enable_groove_sculpt=True)
+    if args.groove_sculpt_amount is not None:
+        preset = replace(preset, groove_sculpt_amount=float(clamp(args.groove_sculpt_amount, 0.0, 1.0)))
+    if args.enable_sub_phase_guard2:
+        preset = replace(preset, enable_sub_phase_guard2=True)
+    if args.sub_phase_guard2_strength is not None:
+        preset = replace(
+            preset,
+            sub_phase_guard2_strength=float(clamp(args.sub_phase_guard2_strength, 0.0, 1.0)),
+        )
+
+    dither_opt: Optional[bool] = None
+    if args.dither and args.no_dither:
+        parser.error("--dither and --no-dither are mutually exclusive")
+    if args.dither:
+        dither_opt = True
+    if args.no_dither:
+        dither_opt = False
+
+    try:
+        result = master(
+            target_path=str(args.target),
+            out_path=str(args.out),
+            preset=preset,
+            reference_path=args.reference,
+            report_path=args.report,
+            out_subtype=args.out_subtype,
+            dither=dither_opt,
+            dither_seed=int(args.dither_seed),
+            profile=bool(args.profile),
+            verify=bool(args.verify),
+            verify_epsilon_db=float(args.verify_epsilon_db),
+        )
+    except Exception as exc:
+        print(f"Mastering failed: {exc}", file=sys.stderr)
+        return 1
+
+    verify_failed = bool(args.verify and not result.get("verify_passed", True))
+    if verify_failed:
+        print("Verification failed. See report for details.", file=sys.stderr)
+        return 2
 
     print("Mastering complete")
     return 0

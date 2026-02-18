@@ -19,9 +19,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 
-from config import settings
-from jobs import job_manager
-from schemas import ErrorResponse, JobCreateResponse, JobReportResponse, JobSettings, JobStatusResponse
+from .config import settings
+from .jobs import job_manager
+from .schemas import ErrorResponse, JobCreateResponse, JobReportResponse, JobSettings, JobStatusResponse
 
 app = FastAPI(title="AuralMind Mastering Service", version="1.0.0")
 
