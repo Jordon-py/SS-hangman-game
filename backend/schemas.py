@@ -14,10 +14,10 @@ class JobSettings(BaseModel):
     """Settings controlling how the mastering job will run."""
 
     preset: str = Field(default="hi_fi_streaming", description="Name of the mastering preset.")
-    enable_demucs: bool = Field(default=False, description="Reserved flag for stem separation pipeline.")
-    mono_sub: bool = Field(default=False, description="Mono-anchor low frequencies below ~120 Hz.")
-    dynamic_eq: bool = Field(default=False, description="Masking-aware dynamic EQ in the 200-500 Hz band.")
-    truepeak_limiter: bool = Field(default=False, description="True-peak safer limiter + soft clip stage.")
+    enable_demucs: Optional[bool] = Field(default=None, description="Toggle stem separation (Demucs).")
+    mono_sub: Optional[bool] = Field(default=None, description="Toggle mono-anchor low frequencies below ~120 Hz.")
+    dynamic_eq: Optional[bool] = Field(default=None, description="Toggle masking-aware dynamic EQ in the 200-500 Hz band.")
+    truepeak_limiter: Optional[bool] = Field(default=None, description="Toggle the true-peak limiter + soft clip stage.")
     target_lufs: Optional[float] = Field(default=None, description="Desired integrated loudness estimate.")
     true_peak_ceiling: float = Field(default=-1.0, description="Limiter output ceiling in dBTP.")
     warmth: float = Field(default=0.0, ge=0.0, le=100.0, description="Analog-style warmth from 0 to 100%.")

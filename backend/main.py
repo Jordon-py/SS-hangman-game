@@ -27,7 +27,7 @@ app = FastAPI(title="AuralMind Mastering Service", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.ALLOWED_ORIGINS or ["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],

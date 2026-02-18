@@ -101,18 +101,27 @@ class JobManager:
             cmd.extend(["--reference", str(job.reference_path)])
         if job.settings.preset:
             cmd.extend(["--preset", job.settings.preset])
-        if job.settings.mono_sub:
-            cmd.append("--enable-mono-sub")
-        if job.settings.dynamic_eq:
-            cmd.append("--enable-masking-dynamic-eq")
-        if job.settings.truepeak_limiter:
-            cmd.append("--enable-truepeak-limiter")
+        if job.settings.enable_demucs is True:
+            cmd.append("--stems")
+        elif job.settings.enable_demucs is False:
+            cmd.append("--no-stems")
+        if job.settings.mono_sub is True:
+            cmd.append("--mono-sub")
+        elif job.settings.mono_sub is False:
+            cmd.append("--no-mono-sub")
+        if job.settings.dynamic_eq is True:
+            cmd.append("--masking-eq")
+        elif job.settings.dynamic_eq is False:
+            cmd.append("--no-masking-eq")
+        if job.settings.truepeak_limiter is False:
+            cmd.append("--no-limiter")
         if job.settings.target_lufs is not None:
             cmd.extend(["--target-lufs", str(job.settings.target_lufs)])
         if job.settings.true_peak_ceiling is not None:
-            cmd.extend(["--true-peak-ceiling", str(job.settings.true_peak_ceiling)])
-        if job.settings.warmth > 0:
-            cmd.extend(["--warmth", str(job.settings.warmth)])
+            cmd.extend(["--ceiling", str(job.settings.true_peak_ceiling)])
+        if job.settings.warmth and job.settings.warmth > 0:
+            warmth = max(0.0, min(float(job.settings.warmth), 100.0)) / 100.0
+            cmd.extend(["--warmth", f"{warmth:.4f}"])
 
         env = os.environ.copy()
         log_file = open(job.log_path, "w", encoding="utf-8")

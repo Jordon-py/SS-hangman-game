@@ -11,9 +11,9 @@ export default function UploadPanel({ onSubmit, loading }) {
   const [target, setTarget] = useState(null);
   const [reference, setReference] = useState(null);
   const [preset, setPreset] = useState('hi_fi_streaming');
-  const [monoSub, setMonoSub] = useState(false);
-  const [dynamicEq, setDynamicEq] = useState(false);
-  const [truepeakLimiter, setTruepeakLimiter] = useState(false);
+  const [monoSub, setMonoSub] = useState(true);
+  const [dynamicEq, setDynamicEq] = useState(true);
+  const [truepeakLimiter, setTruepeakLimiter] = useState(true);
   const [warmth, setWarmth] = useState(0);
   const [targetLufs, setTargetLufs] = useState('');
   const [truePeakCeiling, setTruePeakCeiling] = useState('-1.0');
@@ -109,7 +109,7 @@ export default function UploadPanel({ onSubmit, loading }) {
         </div>
 
         <details className="advanced" open={openAdvanced} onToggle={(e) => setOpenAdvanced(e.currentTarget.open)}>
-          <summary>Advanced modules (all default OFF for safety)</summary>
+          <summary>Advanced modules (defaults follow the preset)</summary>
           <div className="field checkbox-group">
             <label>
               <input type="checkbox" checked={monoSub} onChange={(e) => setMonoSub(e.target.checked)} />
