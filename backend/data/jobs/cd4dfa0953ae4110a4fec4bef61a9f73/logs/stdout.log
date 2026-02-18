@@ -1,0 +1,6 @@
+23:42:27  auralmind  INFO  [master] preset=club  target=C:\Users\goku\Documents\SS-hangman-game\backend\data\jobs\cd4dfa0953ae4110a4fec4bef61a9f73\input\target.wav  reference=C:\Users\goku\Documents\SS-hangman-game\backend\data\jobs\cd4dfa0953ae4110a4fec4bef61a9f73\input\reference.mp3
+23:42:29  auralmind  INFO  [master] audio loaded  sr=48000  dur=217.4s  (2.466s)
+23:48:05  auralmind  INFO  [master] match-EQ + FIR convolution (auto)  (8.321s)
+23:48:15  auralmind  INFO  [master] stereo enhancements  (4.980s)
+23:48:25  auralmind  INFO  [master] microdetail recovery  (9.944s)
+23:51:29  auralmind  INFO  [master] transient sculpt  enabled=True  (15.754s)
