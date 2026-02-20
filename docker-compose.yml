@@ -1,0 +1,45 @@
+services:
+  mastering-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: auralmind-mastering-backend:1.0.0
+    container_name: auralmind-mastering-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      FASTAPI_HOST: "0.0.0.0"
+      FASTAPI_PORT: "8000"
+      MAX_UPLOAD_MB: "300"
+      JOB_TIMEOUT_SEC: "7200"
+      ALLOWED_ORIGINS: "http://localhost:5173"
+      DATA_DIR: "/data/jobs"
+      OMP_NUM_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      NUMEXPR_NUM_THREADS: "2"
+    volumes:
+      - backend_jobs:/data/jobs
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,noexec,nosuid
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 4s
+      retries: 3
+      start_period: 25s
+    cpus: 8.0
+    mem_limit: 10g
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 45s
+
+volumes:
+  backend_jobs:
+    driver: local
