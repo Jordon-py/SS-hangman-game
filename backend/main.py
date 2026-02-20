@@ -9,19 +9,20 @@ creation, status polling and retrieval of outputs and reports.
 
 from __future__ import annotations
 
+from collections import deque
 import json
 import mimetypes
 from pathlib import Path
 from typing import Optional
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 
 from .config import settings
 from .jobs import job_manager
-from .schemas import ErrorResponse, JobCreateResponse, JobReportResponse, JobSettings, JobStatusResponse
+from .schemas import ErrorResponse, JobReportResponse, JobSettings, JobStatusResponse
 
 app = FastAPI(title="AuralMind Mastering Service", version="1.0.0")
 
@@ -52,16 +53,15 @@ def _validate_upload(file: UploadFile, max_mb: int) -> None:
 
 @app.post(
     "/api/jobs",
-    response_model=JobCreateResponse,
+    response_model=JobStatusResponse,
     responses={400: {"model": ErrorResponse}},
 )
 async def create_job(
-    request: Request,
     background_tasks: BackgroundTasks,
     target: UploadFile = File(...),
     reference: Optional[UploadFile] = File(None),
     settings_json: Optional[str] = Form(None),
-) -> JobCreateResponse:
+) -> JobStatusResponse:
     """Create a new mastering job."""
     _validate_upload(target, settings.MAX_UPLOAD_MB)
     if reference:
@@ -92,7 +92,19 @@ async def create_job(
             ref_f.write(ref_content)
 
     background_tasks.add_task(job_manager.run_job, job.id)
-    return JobCreateResponse(id=job.id, status=job.status, settings=job.settings)
+    return JobStatusResponse(
+        id=job.id,
+        status=job.status,
+        progress=job.progress,
+        current_stage=job.current_stage,
+        stage_detail=job.stage_detail,
+        eta_seconds=job.eta_seconds,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        finished_at=job.finished_at,
+        error=job.error,
+        settings=job.settings,
+    )
 
 
 @app.get(
@@ -109,6 +121,9 @@ async def get_job_status(job_id: str) -> JobStatusResponse:
         id=job.id,
         status=job.status,
         progress=job.progress,
+        current_stage=job.current_stage,
+        stage_detail=job.stage_detail,
+        eta_seconds=job.eta_seconds,
         created_at=job.created_at,
         started_at=job.started_at,
         finished_at=job.finished_at,
@@ -168,9 +183,9 @@ async def get_logs(job_id: str, lines: int = 50) -> Response:
     if not job.log_path.is_file():
         raise HTTPException(status_code=404, detail="Log file not found")
     try:
+        safe_lines = max(1, min(int(lines), 500))
         with open(job.log_path, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.readlines()
-        tail = "".join(content[-lines:])
+            tail = "".join(deque(f, maxlen=safe_lines))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Unable to read log: {exc}")
     return Response(content=tail, media_type="text/plain")
@@ -193,6 +208,9 @@ async def cancel_job(job_id: str) -> JobStatusResponse:
         id=job.id,
         status=job.status,
         progress=job.progress,
+        current_stage=job.current_stage,
+        stage_detail=job.stage_detail,
+        eta_seconds=job.eta_seconds,
         created_at=job.created_at,
         started_at=job.started_at,
         finished_at=job.finished_at,

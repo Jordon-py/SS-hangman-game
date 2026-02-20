@@ -703,13 +703,21 @@ def peak_control_chain(
         }
         return y, stats
 
+    softclip_mix_effective = 0.0
     if getattr(preset, "enable_softclip", True):
+        # Hifi tweak: adapt soft-clip mix by crest factor.
+        # Dynamic material gets less clip blend to preserve transient openness.
+        mono = to_mono(y)
+        crest_db = float(lin_to_db(peak(mono) / max(rms(mono), 1e-9) + 1e-12))
+        base_mix = float(getattr(preset, "softclip_mix", 0.25))
+        adaptive_scale = float(np.interp(crest_db, [7.5, 16.0], [1.06, 0.72]))
+        softclip_mix_effective = float(clamp(base_mix * adaptive_scale, 0.0, 0.60))
         y = softclip_oversampled(
             y, sr,
             pre_db_below_ceiling=float(getattr(preset, "softclip_pre_db_below_ceiling", 0.6)),
             ceiling_dbfs=float(preset.ceiling_dbfs),
             drive_db=float(getattr(preset, "softclip_drive_db", 1.2)),
-            mix=float(getattr(preset, "softclip_mix", 0.25)),
+            mix=softclip_mix_effective,
             oversample=int(preset.limiter_oversample),
         )
 
@@ -726,6 +734,7 @@ def peak_control_chain(
             "min_gain_db": float(gr_db),
             "tp_dbfs": float(lin_to_db(true_peak_estimate(y2, sr, oversample=int(preset.limiter_oversample)) + 1e-12)),
             "ceiling_dbfs": float(preset.ceiling_dbfs),
+            "softclip_mix_effective": float(softclip_mix_effective),
             "mode": 1.0,
         }
         return y2, stats
@@ -739,6 +748,7 @@ def peak_control_chain(
         release_ms=float(preset.limiter_release_ms),
         stereo_link=float(getattr(preset, "limiter_stereo_link", 0.92)),
     )
+    st["softclip_mix_effective"] = float(softclip_mix_effective)
     st["mode"] = 2.0
     return y2, st
 
@@ -1133,7 +1143,8 @@ def match_eq_curve(reference: Optional[np.ndarray], target: np.ndarray, sr: int,
     delta_db = np.maximum(delta_db, hf_cut_cap)
 
     # Guardrails: do NOT allow large HF boosts (harshness risk).
-    hf_boost_cap = np.interp(freqs, [0, 6000, 8000, 20000], [max_eq_db, max_eq_db, 3.0, 3.0]).astype(np.float32)
+    # Keep the top octave especially conservative for cleaner "air".
+    hf_boost_cap = np.interp(freqs, [0, 6000, 8000, 12000, 20000], [max_eq_db, max_eq_db, 2.8, 2.4, 2.2]).astype(np.float32)
     delta_db = np.minimum(delta_db, hf_boost_cap)
 
     # Hard cap overall
@@ -1964,6 +1975,7 @@ def get_presets() -> Dict[str, Preset]:
             limiter_oversample=8,
             limiter_attack_ms=1.2,
             limiter_release_ms=70.0,
+            limiter_stereo_link=0.95,
             softclip_drive_db=0.9,
             softclip_mix=0.18,
             microdetail_amount=0.18,
@@ -2405,6 +2417,7 @@ def master(target_path: str, out_path: str, preset: Preset,
         "limiter_mode": str(getattr(preset, "limiter_mode", "v2")),
         "limiter_min_gain_db": float(final_gr_db),
         "limiter_avg_gr_db": float(best_stats.get("avg_gr_db", 0.0)) if "best_stats" in locals() and best_stats is not None else None,
+        "softclip_mix_effective": float(best_stats.get("softclip_mix_effective", getattr(preset, "softclip_mix", 0.0))),
         "sub_f0_hz": float(f0) if f0 is not None else None,
         "mono_sub_cutoff_hz": float(mono_cut) if mono_cut is not None else None,
         "mono_sub_mix": float(mono_mix) if mono_mix is not None else None,
@@ -2429,6 +2442,7 @@ def master(target_path: str, out_path: str, preset: Preset,
             f.write(f"- LUFS (post): **{result['lufs_post']:.2f}**\n")
             f.write(f"- True peak (approx): **{result['true_peak_dbfs']:.2f} dBFS**\n")
             f.write(f"- Limiter min gain (approx GR): **{result['limiter_min_gain_db']:.2f} dB**\n\n")
+            f.write(f"- Effective softclip mix: **{result['softclip_mix_effective']:.3f}**\n\n")
 
             f.write("## Low-end / music theory anchors\n")
             f.write(f"- Estimated sub fundamental f0: **{result['sub_f0_hz']} Hz**\n")

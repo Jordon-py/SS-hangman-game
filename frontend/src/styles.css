@@ -416,9 +416,44 @@ summary:focus-visible {
   transition: width 240ms ease;
 }
 
+.progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.progress-stage {
+  margin-top: 0.1rem;
+  display: block;
+  color: var(--muted);
+}
+
 .job-detail {
   padding: 1rem;
   margin-bottom: 2rem;
+}
+
+.master-state {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: linear-gradient(155deg, rgba(255, 255, 255, 0.9), rgba(236, 248, 253, 0.7));
+  padding: 0.72rem;
+  margin-bottom: 0.84rem;
+}
+
+.master-state h3 {
+  margin: 0 0 0.38rem;
+}
+
+.master-state-headline {
+  font-weight: 700;
+  margin-bottom: 0.24rem;
+}
+
+.master-state-detail {
+  margin: 0 0 0.52rem;
+  color: var(--muted);
+  font-size: 0.92rem;
 }
 
 .actions-row {

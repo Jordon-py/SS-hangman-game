@@ -1,7 +1,18 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
-async function apiFetch(path, { method = 'GET', headers = {}, body = null, timeout = 30000 } = {}) {
+async function apiFetch(
+  path,
+  { method = 'GET', headers = {}, body = null, timeout = 30000, signal } = {}
+) {
   const controller = new AbortController();
+  const abortFromParent = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) {
+      controller.abort();
+    } else {
+      signal.addEventListener('abort', abortFromParent, { once: true });
+    }
+  }
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
     const res = await fetch(`${API_BASE_URL}${path}`, {
@@ -10,7 +21,6 @@ async function apiFetch(path, { method = 'GET', headers = {}, body = null, timeo
       body,
       signal: controller.signal,
     });
-    clearTimeout(timer);
     if (!res.ok) {
       const errorBody = await res.text();
       let msg = `Request failed: ${res.status}`;
@@ -28,11 +38,18 @@ async function apiFetch(path, { method = 'GET', headers = {}, body = null, timeo
     }
     return res;
   } catch (err) {
-    clearTimeout(timer);
     if (err.name === 'AbortError') {
+      if (signal?.aborted) {
+        throw err;
+      }
       throw new Error('Request timed out');
     }
     throw err;
+  } finally {
+    clearTimeout(timer);
+    if (signal) {
+      signal.removeEventListener('abort', abortFromParent);
+    }
   }
 }
 
@@ -45,8 +62,8 @@ export async function createJob(formData, settings) {
   return await apiFetch('/api/jobs', { method: 'POST', body: multipart });
 }
 
-export async function fetchJobStatus(id) {
-  return await apiFetch(`/api/jobs/${id}`);
+export async function fetchJobStatus(id, options = {}) {
+  return await apiFetch(`/api/jobs/${id}`, options);
 }
 
 export async function fetchReport(id) {

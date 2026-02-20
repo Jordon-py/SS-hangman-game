@@ -1,21 +1,38 @@
 import React, { useEffect, useState } from 'react';
 import { cancelJob, downloadOutput, fetchLogs as fetchJobLogs, fetchReport as fetchJobReport } from '../api.js';
 
+function formatProgress(value) {
+  const safe = Number.isFinite(value) ? Math.min(Math.max(value, 0), 100) : 0;
+  return safe.toFixed(1);
+}
+
+function formatEta(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  const total = Math.max(0, Math.round(seconds));
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  if (mins === 0) return `${secs}s`;
+  if (secs === 0) return `${mins}m`;
+  return `${mins}m ${secs}s`;
+}
+
 export default function JobDetail({ job }) {
   const [report, setReport] = useState(null);
   const [logs, setLogs] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
     let inFlight = false;
 
-    async function load() {
+    async function load({ initial = false } = {}) {
       if (inFlight) return;
       inFlight = true;
-      setLoading(true);
-      setError(null);
+      if (initial) {
+        setLoading(true);
+        setError(null);
+      }
       try {
         const reportPromise =
           job.status === 'completed' ? fetchJobReport(job.id).catch(() => null) : Promise.resolve(null);
@@ -29,11 +46,11 @@ export default function JobDetail({ job }) {
         if (!cancelled) setError(err.message || 'Failed to fetch details');
       } finally {
         inFlight = false;
-        if (!cancelled) setLoading(false);
+        if (!cancelled && initial) setLoading(false);
       }
     }
 
-    load();
+    load({ initial: true });
     const shouldPoll = ['queued', 'processing'].includes(job.status);
     if (!shouldPoll) {
       return () => {
@@ -41,7 +58,9 @@ export default function JobDetail({ job }) {
       };
     }
 
-    const interval = setInterval(load, 4000);
+    const interval = setInterval(() => {
+      load({ initial: false });
+    }, 3000);
     return () => {
       cancelled = true;
       clearInterval(interval);
@@ -88,13 +107,28 @@ export default function JobDetail({ job }) {
     }
   };
 
+  const progressText = formatProgress(job.progress);
+  const etaText = ['queued', 'processing'].includes(job.status) ? formatEta(job.eta_seconds) : null;
+
   return (
     <div className="job-detail" aria-labelledby={`job-${job.id}`}>
       <h2 id={`job-${job.id}`}>Job {job.id.slice(0, 8)} details</h2>
       {loading && <p>Loading details…</p>}
       {error && <p className="error" role="alert">{error}</p>}
-      {!loading && !error && (
+      {!error && (
         <>
+          <section className="master-state">
+            <h3>Mastering State</h3>
+            <div className="master-state-headline">{job.current_stage || 'Preparing pipeline'}</div>
+            {job.stage_detail && <p className="master-state-detail">{job.stage_detail}</p>}
+            <div className="progress-bar" aria-valuenow={Number(progressText)} aria-valuemin="0" aria-valuemax="100" role="progressbar">
+              <div className="progress" style={{ width: `${progressText}%` }} />
+            </div>
+            <div className="progress-meta">
+              <small>{progressText}% complete</small>
+              {etaText && <small>ETA ~ {etaText}</small>}
+            </div>
+          </section>
           <div className="actions-row">
             <button type="button" onClick={handleDownloadReport} disabled={!report}>
               Download Report

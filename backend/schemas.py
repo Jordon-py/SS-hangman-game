@@ -61,6 +61,9 @@ class JobStatusResponse(BaseModel):
     id: str
     status: str
     progress: float = Field(..., ge=0.0, le=100.0)
+    current_stage: Optional[str] = None
+    stage_detail: Optional[str] = None
+    eta_seconds: Optional[int] = Field(default=None, ge=0)
     created_at: datetime
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None

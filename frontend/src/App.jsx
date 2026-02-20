@@ -9,32 +9,66 @@ export default function App() {
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const pollingIds = useMemo(() => {
+    const ids = new Set(jobs.filter((job) => ['queued', 'processing'].includes(job.status)).map((job) => job.id));
+    if (selectedJobId) ids.add(selectedJobId);
+    return Array.from(ids).sort();
+  }, [jobs, selectedJobId]);
+  const pollingKey = useMemo(() => pollingIds.join('|'), [pollingIds]);
 
   useEffect(() => {
-    if (jobs.length === 0) return undefined;
+    if (pollingIds.length === 0) return undefined;
 
-    const interval = setInterval(async () => {
-      const activeJobs = jobs.filter((job) => ['queued', 'processing'].includes(job.status));
-      if (activeJobs.length === 0) return;
+    let stopped = false;
+    let intervalId = null;
+    const controller = new AbortController();
 
+    async function tick() {
+      if (stopped) return;
       try {
-        const updatedStatuses = await Promise.all(activeJobs.map((job) => fetchJobStatus(job.id)));
-        const statusById = new Map(updatedStatuses.map((job) => [job.id, job]));
-        setJobs((prevJobs) => prevJobs.map((job) => statusById.get(job.id) ?? job));
-      } catch (pollError) {
-        console.error(pollError);
-      }
-    }, 3000);
+        const statuses = await Promise.all(
+          pollingIds.map((jobId) => fetchJobStatus(jobId, { signal: controller.signal }))
+        );
+        if (stopped) return;
 
-    return () => clearInterval(interval);
-  }, [jobs]);
+        const byId = new Map(statuses.map((job) => [job.id, job]));
+        setJobs((prevJobs) => prevJobs.map((job) => (byId.has(job.id) ? { ...job, ...byId.get(job.id) } : job)));
+
+        const activeRemaining = statuses.some((job) => ['queued', 'processing'].includes(job.status));
+        if (!activeRemaining && intervalId) {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+      } catch (pollError) {
+        if (!stopped && pollError?.name !== 'AbortError') {
+          console.error(pollError);
+        }
+      }
+    }
+
+    tick();
+    intervalId = setInterval(tick, 2000);
+
+    return () => {
+      stopped = true;
+      controller.abort();
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [pollingKey]);
 
   const handleSubmit = async (formData, settings) => {
     setLoading(true);
     setError(null);
     try {
       const res = await createJob(formData, settings);
-      setJobs((prev) => [res, ...prev]);
+      const hydrated = {
+        progress: 0,
+        created_at: new Date().toISOString(),
+        current_stage: 'Queued',
+        stage_detail: 'Waiting for an available worker',
+        ...res,
+      };
+      setJobs((prev) => [hydrated, ...prev]);
       setSelectedJobId(res.id);
     } catch (submitError) {
       setError(submitError.message || 'Failed to create job');
