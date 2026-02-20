@@ -4,3 +4,6 @@ frontend/dist/
 __pycache__/
 backend/__pycache__/
 *.pyc
+backend/.env
+frontend/.env
+frontend/.env.production

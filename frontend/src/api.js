@@ -1,4 +1,42 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+function normalizeApiBaseUrl(rawValue) {
+  const value = String(rawValue || '')
+    .trim()
+    .replace(/^['"]|['"]$/g, '');
+
+  if (!value) return '';
+
+  if (/^https?:\/\//i.test(value)) {
+    return value.replace(/\/+$/, '').replace(/\/api$/i, '');
+  }
+
+  if (/^[\w.-]+(?::\d+)?$/i.test(value)) {
+    return `http://${value}`.replace(/\/+$/, '').replace(/\/api$/i, '');
+  }
+
+  return '';
+}
+
+function resolveApiBaseUrl() {
+  const envBase = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
+  if (envBase) return envBase;
+
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname;
+    if (host === 'localhost' || host === '127.0.0.1') {
+      return 'http://localhost:8000';
+    }
+  }
+
+  // Production fallback for reverse-proxy / rewrite setups.
+  return '';
+}
+
+const API_BASE_URL = resolveApiBaseUrl();
+
+function buildApiUrl(path) {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${API_BASE_URL}${normalizedPath}`;
+}
 
 async function apiFetch(
   path,
@@ -15,7 +53,7 @@ async function apiFetch(
   }
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
-    const res = await fetch(`${API_BASE_URL}${path}`, {
+    const res = await fetch(buildApiUrl(path), {
       method,
       headers,
       body,
@@ -43,6 +81,12 @@ async function apiFetch(
         throw err;
       }
       throw new Error('Request timed out');
+    }
+    if (err instanceof TypeError || /failed to fetch/i.test(String(err?.message || ''))) {
+      const origin = typeof window !== 'undefined' ? window.location.origin : 'the frontend origin';
+      throw new Error(
+        `Cannot reach API at ${API_BASE_URL || 'same-origin /api'}. Start backend and verify CORS allows ${origin}.`
+      );
     }
     throw err;
   } finally {

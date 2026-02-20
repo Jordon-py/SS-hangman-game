@@ -15,13 +15,13 @@ export default function UploadPanel({ onSubmit, loading }) {
   const [dynamicEq, setDynamicEq] = useState(true);
   const [truepeakLimiter, setTruepeakLimiter] = useState(true);
   const [warmth, setWarmth] = useState(0);
-  const [targetLufs, setTargetLufs] = useState('');
+  const [targetLufs, setTargetLufs] = useState('-11');
   const [truePeakCeiling, setTruePeakCeiling] = useState('-1.0');
-  const [sectionAwareMastering, setSectionAwareMastering] = useState(false);
-  const [sectionLiftMix, setSectionLiftMix] = useState('0.2');
+  const [sectionAwareMastering, setSectionAwareMastering] = useState(true);
+  const [sectionLiftMix, setSectionLiftMix] = useState('0.23');
   const [grooveTransientSculpting, setGrooveTransientSculpting] = useState(false);
   const [grooveTransientBoostDb, setGrooveTransientBoostDb] = useState('1.8');
-  const [outputPcmBits, setOutputPcmBits] = useState('16');
+  const [outputPcmBits, setOutputPcmBits] = useState('24');
   const [openAdvanced, setOpenAdvanced] = useState(false);
   const [formError, setFormError] = useState(null);
   const [dragActive, setDragActive] = useState(false);
@@ -42,6 +42,11 @@ export default function UploadPanel({ onSubmit, loading }) {
       setFormError('Please choose a target file');
       return;
     }
+    const parsedOutputPcmBits = parseInt(outputPcmBits, 10);
+    if (![16, 24].includes(parsedOutputPcmBits)) {
+      setFormError('Output bit depth must be 16-bit or 24-bit.');
+      return;
+    }
 
     const formData = new FormData();
     formData.append('target', target);
@@ -59,7 +64,7 @@ export default function UploadPanel({ onSubmit, loading }) {
       section_lift_mix: sectionAwareMastering ? parseFloat(sectionLiftMix) : undefined,
       groove_transient_sculpting: grooveTransientSculpting,
       groove_transient_boost_db: grooveTransientSculpting ? parseFloat(grooveTransientBoostDb) : undefined,
-      output_pcm_bits: parseInt(outputPcmBits, 10),
+      output_pcm_bits: parsedOutputPcmBits,
     };
     onSubmit(formData, settings);
   };
@@ -141,7 +146,7 @@ export default function UploadPanel({ onSubmit, loading }) {
               type="range"
               min="0"
               max="100"
-              step="1"
+              step=".10"
               value={warmth}
               onChange={(e) => setWarmth(e.target.value)}
             />

@@ -143,3 +143,46 @@ curl http://localhost:8000/api/health
 2. Add optional GPU path for Demucs and configurable worker queue isolation.
 3. Add persistent metadata store for job state recovery across backend restarts.
 4. Add standardized ABX export package for listening tests and engineer review.
+
+## Heroku + Netlify Deployment
+
+### Backend on Heroku
+
+This repository includes:
+
+- `Procfile` with `gunicorn` + `uvicorn` worker for production serving
+- `runtime.txt` pinned to Python 3.11 for SciPy compatibility
+
+Set Heroku Config Vars:
+
+- `ALLOWED_ORIGINS=https://auralmind.netlify.app,http://localhost:5173`
+- `ALLOWED_ORIGIN_REGEX=https://.*--auralmind\.netlify\.app` (optional, for Netlify deploy previews)
+- `MAX_UPLOAD_MB=200`
+- `JOB_TIMEOUT_SEC=3600`
+
+Heroku provides `PORT` automatically.
+
+Optional overrides (only if you need custom locations):
+
+- `AURALMIND_SCRIPT_PATH`
+- `DATA_DIR`
+
+### Frontend on Netlify
+
+This repository includes `netlify.toml` configured for:
+
+- Build base: `frontend`
+- Build command: `npm run build`
+- Publish directory: `dist`
+- SPA redirect: `/* -> /index.html`
+
+Set Netlify Environment Variable:
+
+- `VITE_API_BASE_URL=https://auralmind-master-778194383141.herokuapp.com`
+
+The frontend fetch layer reads `VITE_API_BASE_URL` first. If missing:
+
+- On localhost, it falls back to `http://localhost:8000`
+- In production, it falls back to same-origin `/api` (for proxy/rewrite setups)
+
+`netlify.toml` already contains an `/api/*` redirect to Heroku as a production fallback proxy.

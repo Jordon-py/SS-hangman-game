@@ -24,8 +24,12 @@ from typing import Dict, Optional
 
 import soundfile as sf
 
-from .config import settings
-from .schemas import JobSettings
+try:
+    from .config import settings
+    from .schemas import JobSettings
+except ImportError:  # pragma: no cover - supports direct module execution
+    from config import settings
+    from schemas import JobSettings
 
 _DURATION_RE = re.compile(r"dur=([0-9]+(?:\.[0-9]+)?)s")
 _STAGE_HINTS = (
