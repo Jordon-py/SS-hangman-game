@@ -1,5 +1,16 @@
-# Exclude files and directories
-node_modules/
-__pycache__/
+# VCS and local env
 .git/
-.env/
+.gitignore
+.env
+venv/
+__pycache__/
+*.pyc
+
+# Frontend artifacts (backend container does not need these)
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Runtime and generated data
+backend/data/
+*.log

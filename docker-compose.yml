@@ -1,1 +1,45 @@
-version: '3.8'\n\nservices:\n  backend:\n    image: backend-image:latest\n    ports:\n      - '8000:8000'\n    networks:\n      - app-network\n    environment:\n      - DATABASE_URL=mysql://user:password@mysql/db\n      - SECRET_KEY=mysecretkey\n\n  frontend:\n    image: frontend-image:latest\n    ports:\n      - '5173:5173'\n    networks:\n      - app-network\n\nnetworks:\n  app-network:
+services:
+  mastering-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: auralmind-mastering-backend:1.0.0
+    container_name: auralmind-mastering-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      FASTAPI_HOST: "0.0.0.0"
+      FASTAPI_PORT: "8000"
+      MAX_UPLOAD_MB: "300"
+      JOB_TIMEOUT_SEC: "7200"
+      ALLOWED_ORIGINS: "http://localhost:5173"
+      DATA_DIR: "/data/jobs"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    volumes:
+      - backend_jobs:/data/jobs
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,noexec,nosuid
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 4s
+      retries: 3
+      start_period: 25s
+    cpus: 4.0
+    mem_limit: 8g
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 45s
+
+volumes:
+  backend_jobs:
+    driver: local

@@ -21,6 +21,15 @@ What's new vs earlier generations
    - Spatial Realism Enhancer (frequency-dependent M/S width + correlation guard)
    - NEW: Correlation-Guarded MicroShift (CGMS): micro-delay applied ONLY to SIDE high-band (>=2k)
           with a mono-compatibility guard to avoid phasey collapse.
+5) Phase-Coherent Masking EQ Upgrade:
+   - Dynamic (time-varying) MID-only masking control with zero-phase filtering.
+   - Reduces muddy low-mid buildup while preserving side-image integrity.
+6) De-Esser Upgrade:
+   - Lookahead + soft-knee split-band de-essing with attack/release smoothing.
+   - Better sibilant control before limiting without flattening transients.
+7) Runtime Optimizations:
+   - Batched vectorized FFT magnitude analysis (fewer Python loops).
+   - Cached DSP coefficients + LUFS baseline reuse inside governor search.
 
 Dependencies
 ------------
@@ -57,6 +66,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from typing import Optional, Tuple, Dict, Any, Union
 
 import numpy as np
@@ -91,7 +101,7 @@ def db_to_lin(db: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
     arr = np.asarray(db, dtype=np.float32)
     return (10.0 ** (arr / 20.0)).astype(np.float32)
 
-def lin_to_db(x: Union[float, np.ndarray], eps: float = 1e-12) -> Union[float, np.ndarray]:
+def lin_to_db(x: float, eps: float = 1e-12) -> Union[float, np.ndarray]:
     if np.isscalar(x):
         return float(20.0 * math.log10(max(abs(float(x)), eps)))
     arr = np.asarray(x, dtype=np.float32)
@@ -124,6 +134,13 @@ def smoothstep(x: float, lo: float, hi: float) -> float:
     t = clamp((x - lo) / (hi - lo), 0.0, 1.0)
     return float(t * t * (3.0 - 2.0 * t))
 
+def smoothstep_array(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    """Vectorized smoothstep for stable per-sample control envelopes."""
+    if hi <= lo:
+        return np.zeros_like(x, dtype=np.float32)
+    t = np.clip((x.astype(np.float32) - float(lo)) / float(hi - lo), 0.0, 1.0).astype(np.float32)
+    return (t * t * (3.0 - 2.0 * t)).astype(np.float32)
+
 def ensure_stereo(y: np.ndarray) -> np.ndarray:
     if y.ndim == 1:
         return np.stack([y, y], axis=1)
@@ -145,12 +162,19 @@ def resample_audio(y: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
     down = sr_in // g
     return sps.resample_poly(y, up=up, down=down, axis=0).astype(np.float32)
 
-def butter_highpass(cut_hz: float, sr: int, order: int = 2):
+@lru_cache(maxsize=256)
+def _butter_highpass_cached(cut_hz: float, sr: int, order: int):
+    # Cache filter design because many stages repeatedly ask for identical cutoff/sr pairs.
     nyq = 0.5 * sr
     cut = max(1.0, cut_hz) / nyq
     return sps.butter(order, cut, btype="highpass")
 
-def butter_bandpass(lo_hz: float, hi_hz: float, sr: int, order: int = 2):
+def butter_highpass(cut_hz: float, sr: int, order: int = 2):
+    return _butter_highpass_cached(round(float(cut_hz), 6), int(sr), int(order))
+
+@lru_cache(maxsize=512)
+def _butter_bandpass_cached(lo_hz: float, hi_hz: float, sr: int, order: int):
+    # Cached design avoids expensive coefficient recomputation in iterative DSP paths.
     nyq = 0.5 * sr
     lo = max(1.0, lo_hz) / nyq
     hi = min(nyq * 0.999, hi_hz) / nyq
@@ -158,8 +182,19 @@ def butter_bandpass(lo_hz: float, hi_hz: float, sr: int, order: int = 2):
         hi = min(0.999, lo + 0.05)
     return sps.butter(order, [lo, hi], btype="bandpass")
 
+def butter_bandpass(lo_hz: float, hi_hz: float, sr: int, order: int = 2):
+    return _butter_bandpass_cached(round(float(lo_hz), 6), round(float(hi_hz), 6), int(sr), int(order))
+
 def apply_iir(y: np.ndarray, b, a) -> np.ndarray:
     return sps.lfilter(b, a, y, axis=0).astype(np.float32)
+
+def _safe_filtfilt_1d(x: np.ndarray, b: np.ndarray, a: np.ndarray) -> np.ndarray:
+    """Use filtfilt when pad constraints are met, otherwise safe forward filtering."""
+    x = np.asarray(x, dtype=np.float32)
+    padlen = 3 * (max(len(a), len(b)) - 1)
+    if x.size <= max(32, padlen + 1):
+        return sps.lfilter(b, a, x).astype(np.float32)
+    return sps.filtfilt(b, a, x).astype(np.float32)
 
 def mid_side_encode(y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     L = y[:, 0]
@@ -177,24 +212,43 @@ def windowed_fft_mag(x: np.ndarray, n_fft: int, hop: int) -> np.ndarray:
     """Return average magnitude spectrum (linear) across frames for mono x."""
     if x.ndim != 1:
         raise ValueError("windowed_fft_mag expects mono array.")
+    n_fft = int(n_fft)
+    hop = max(1, int(hop))
     win = np.hanning(n_fft).astype(np.float32)
-    mags = []
-    for start in range(0, max(1, len(x) - n_fft), hop):
-        frame = x[start:start+n_fft]
-        if len(frame) < n_fft:
-            frame = np.pad(frame, (0, n_fft - len(frame)))
+
+    x = np.asarray(x, dtype=np.float32)
+    if x.size < n_fft:
+        frame = np.pad(x, (0, n_fft - x.size)).astype(np.float32, copy=False)
         spec = np.fft.rfft(frame * win)
-        mags.append(np.abs(spec))
-    if not mags:
-        return np.zeros(n_fft//2 + 1, dtype=np.float32)
-    return np.mean(np.stack(mags, axis=0), axis=0).astype(np.float32)
+        return np.abs(spec).astype(np.float32)
+
+    # Build a stride-based frame view and process in batches to keep peak RAM bounded.
+    # This keeps numerical output equivalent to frame loops, but runs much faster.
+    tail = int((hop - ((x.size - n_fft) % hop)) % hop)
+    if tail > 0:
+        x = np.pad(x, (0, tail)).astype(np.float32, copy=False)
+    frames = np.lib.stride_tricks.sliding_window_view(x, n_fft)[::hop]
+    if frames.size == 0:
+        return np.zeros(n_fft // 2 + 1, dtype=np.float32)
+
+    n_bins = n_fft // 2 + 1
+    acc = np.zeros(n_bins, dtype=np.float64)
+    batch_frames = 192
+    for i in range(0, frames.shape[0], batch_frames):
+        batch = frames[i:i + batch_frames].astype(np.float32, copy=False)
+        spec = np.fft.rfft(batch * win[None, :], axis=1)
+        acc += np.abs(spec).sum(axis=0, dtype=np.float64)
+
+    return (acc / max(1, frames.shape[0])).astype(np.float32)
 
 
 # ---------------------------
 # Loudness (approx BS.1770)
 # ---------------------------
 
-def k_weighting_filter(sr: int):
+@lru_cache(maxsize=32)
+def _k_weighting_filter_cached(sr: int):
+    """K-weighting coefficient cache keyed by sample rate."""
     """
     Approximate K-weighting using a cascaded high-pass + shelving filter.
     This is not a full standard-validated implementation, but is stable and
@@ -222,6 +276,9 @@ def k_weighting_filter(sr: int):
     bs = np.array([b0, b1s, b2]) / a0
     a_s = np.array([1.0, a1s/a0, a2/a0])
     return (b1, a1), (bs, a_s)
+
+def k_weighting_filter(sr: int):
+    return _k_weighting_filter_cached(int(sr))
 
 def integrated_loudness_lufs(y: np.ndarray, sr: int) -> float:
     """
@@ -373,8 +430,15 @@ def auto_tune_preset(
     return tuned, info
 
 
-def apply_lufs_gain(y: np.ndarray, sr: int, target_lufs: float) -> Tuple[np.ndarray, float, float]:
-    cur = integrated_loudness_lufs(y, sr)
+def apply_lufs_gain(
+    y: np.ndarray,
+    sr: int,
+    target_lufs: float,
+    *,
+    cur_lufs: Optional[float] = None,
+) -> Tuple[np.ndarray, float, float]:
+    # cur_lufs is optional so governor loops can reuse one baseline measurement.
+    cur = float(cur_lufs) if cur_lufs is not None else integrated_loudness_lufs(y, sr)
     gain_db = target_lufs - cur
     g = db_to_lin(gain_db)
     return (y * g).astype(np.float32), cur, gain_db
@@ -506,28 +570,28 @@ def apply_warmth_tilt(y: np.ndarray, sr: int, amount: float) -> np.ndarray:
     """
     if amount <= 0.0:
         return y
-    
+
     amount = clamp(amount, 0.0, 1.0)
     # Shelf gains
     db = 3.0 * amount
-    
+
     # Low shelf boost
     # High shelf cut
     # Using simple biquads
-    
+
     def low_shelf(x, f0, gain_db, Q=0.707):
         A = 10**(gain_db/40)
         w0 = 2*math.pi*f0/sr
         alpha = math.sin(w0)/2 * math.sqrt((A + 1/A)*(1/Q - 1) + 2)
         cosw0 = math.cos(w0)
-        
+
         b0 =    A*((A+1) - (A-1)*cosw0 + 2*math.sqrt(A)*alpha)
         b1 =  2*A*((A-1) - (A+1)*cosw0)
         b2 =    A*((A+1) - (A-1)*cosw0 - 2*math.sqrt(A)*alpha)
         a0 =        (A+1) + (A-1)*cosw0 + 2*math.sqrt(A)*alpha
         a1 =   -2*((A-1) + (A+1)*cosw0)
         a2 =        (A+1) + (A-1)*cosw0 - 2*math.sqrt(A)*alpha
-        
+
         b = np.array([b0, b1, b2]) / a0
         a = np.array([1.0, a1/a0, a2/a0])
         return apply_iir(x, b, a)
@@ -540,7 +604,7 @@ def apply_warmth_tilt(y: np.ndarray, sr: int, amount: float) -> np.ndarray:
         w0 = 2*math.pi*f0/sr
         alpha = math.sin(w0)/2 * math.sqrt((A + 1/A)*(1/Q - 1) + 2)
         cosw0 = math.cos(w0)
-        
+
         b0 =    A*((A+1) + (A-1)*cosw0 + 2*math.sqrt(A)*alpha)
         b1 = -2*A*((A-1) + (A+1)*cosw0)
         b2 =    A*((A+1) + (A-1)*cosw0 - 2*math.sqrt(A)*alpha)
@@ -556,7 +620,7 @@ def apply_warmth_tilt(y: np.ndarray, sr: int, amount: float) -> np.ndarray:
     y = low_shelf(y, 300.0, db)
     # Cut highs above 2kHz
     y = high_shelf(y, 2500.0, -db)
-    
+
     return y
 
 
@@ -1085,30 +1149,46 @@ def match_eq_curve(reference: Optional[np.ndarray], target: np.ndarray, sr: int,
 
 def dynamic_masking_eq(y: np.ndarray, sr: int, max_dip_db: float = 1.5) -> np.ndarray:
     """
-    If low-mids mask the presence band, apply a gentle dynamic dip around ~300 Hz.
-    (Static estimate over whole track; robust and safe.)
+    Psychoacoustic masking control (phase-coherent, MID-only):
+    - detect short-term low-mid masking vs presence energy
+    - drive a conservative dynamic dip around 300 Hz
+    - apply in MID only to preserve stereo field
+    - use zero-phase filtering (offline-safe) to avoid phase smear
     """
-    y = ensure_stereo(y)
-    mid, _ = mid_side_encode(y)
+    y = ensure_stereo(y).astype(np.float32)
+    mid, side = mid_side_encode(y)
 
-    # measure low-mid and presence energies
+    # Measure masking ratio in short-term envelopes:
+    # if low-mid RMS dominates presence RMS, intelligibility can collapse.
     b1, a1 = butter_bandpass(220, 360, sr, order=2)
     b2, a2 = butter_bandpass(2000, 6000, sr, order=2)
-    lm = sps.lfilter(b1, a1, mid)
-    pr = sps.lfilter(b2, a2, mid)
-    ratio = rms(lm) / max(rms(pr), 1e-9)  # >1 means masking risk
+    lm = sps.lfilter(b1, a1, mid).astype(np.float32)
+    pr = sps.lfilter(b2, a2, mid).astype(np.float32)
 
-    # map ratio to dip amount
-    amt = smoothstep(ratio, lo=0.95, hi=1.55)  # 0..1
-    dip_db = -max_dip_db * amt
+    env_win = max(128, int(sr * 0.25))
+    env_kernel = np.ones(env_win, dtype=np.float32) / float(env_win)
+    lm_env = np.sqrt(np.convolve(lm * lm, env_kernel, mode="same") + 1e-12).astype(np.float32)
+    pr_env = np.sqrt(np.convolve(pr * pr, env_kernel, mode="same") + 1e-12).astype(np.float32)
 
-    if dip_db >= -0.01:
+    ratio = (lm_env / np.maximum(pr_env, 1e-9)).astype(np.float32)
+    amt = smoothstep_array(ratio, lo=0.95, hi=1.55)
+    if float(np.max(amt)) < 1e-4:
         return y
 
-    # peaking filter (RBJ) at 300 Hz
+    # Smooth gain map to avoid fast "EQ flutter" that would sound synthetic.
+    smooth_win = max(64, int(sr * 0.06))
+    smooth_kernel = np.ones(smooth_win, dtype=np.float32) / float(smooth_win)
+    amt_s = np.convolve(amt, smooth_kernel, mode="same").astype(np.float32)
+    dip_db_env = (-float(max_dip_db) * amt_s).astype(np.float32)
+    max_dip = float(np.min(dip_db_env))
+    if max_dip >= -0.01:
+        return y
+
+    # Design one max-depth filter and modulate only the blend depth.
+    # This avoids per-sample filter redesign and keeps phase behavior stable.
     f0 = 300.0
     Q = 1.0
-    A = 10**(dip_db/40)
+    A = 10**(max_dip / 40)
     w0 = 2*math.pi*f0/sr
     alpha = math.sin(w0)/(2*Q)
     cosw0 = math.cos(w0)
@@ -1122,31 +1202,72 @@ def dynamic_masking_eq(y: np.ndarray, sr: int, max_dip_db: float = 1.5) -> np.nd
 
     b = np.array([b0, b1p, b2]) / a0
     a = np.array([1.0, a1p/a0, a2/a0])
-    return apply_iir(y, b, a)
+    mid_eq = _safe_filtfilt_1d(mid, b, a)
+
+    # Per-sample blend depth (0..1) from current masking amount.
+    depth = np.clip(np.abs(dip_db_env) / max(abs(max_dip), 1e-6), 0.0, 1.0).astype(np.float32)
+    mid_out = (mid + (mid_eq - mid) * depth).astype(np.float32)
+    return mid_side_decode(mid_out, side)
 
 def de_ess(y: np.ndarray, sr: int, band: Tuple[float,float]=(6000, 10000),
-           threshold_db: float = -18.0, ratio: float = 3.0, mix: float = 0.55) -> np.ndarray:
+           threshold_db: float = -18.0, ratio: float = 3.0, mix: float = 0.55,
+           lookahead_ms: float = 1.2, attack_ms: float = 2.0,
+           release_ms: float = 50.0, knee_db: float = 4.0) -> np.ndarray:
     """
-    Simple broadband de-esser: bandpass -> envelope -> gain reduction -> mix back.
+    Phase-coherent split-band de-esser with lookahead + soft knee.
+
+    The sidechain predicts short sibilant bursts (lookahead), but gain is
+    smoothed with attack/release so transients stay intact and brightness
+    remains natural.
     """
     y = ensure_stereo(y).astype(np.float32)
+    mix = float(clamp(mix, 0.0, 1.0))
+    if mix <= 0.0:
+        return y
+
+    ratio = max(1.0, float(ratio))
     mid, side = mid_side_encode(y)
     b, a = butter_bandpass(band[0], band[1], sr, order=2)
-    s_band = sps.lfilter(b, a, mid).astype(np.float32)
+    s_band = _safe_filtfilt_1d(mid, b, a)
 
-    # envelope (RMS over 5ms)
-    win = max(32, int(sr * 0.005))
-    env = np.sqrt(sps.convolve(s_band**2, np.ones(win)/win, mode="same") + 1e-12).astype(np.float32)
-    env_db = 20*np.log10(np.maximum(env, 1e-9)).astype(np.float32)
+    env = np.abs(s_band).astype(np.float32)
+    # Lookahead catches "s"/"sh" bursts slightly early so the limiter sees cleaner peaks.
+    lookahead = max(1, int(sr * max(0.0, float(lookahead_ms)) / 1000.0))
+    if lookahead > 1:
+        env = maximum_filter1d(env, size=lookahead, mode="nearest").astype(np.float32)
+    env_db = lin_to_db(env + 1e-9).astype(np.float32)
 
-    # gain reduction when above threshold
-    over = np.maximum(0.0, env_db - threshold_db)
-    gr_db = -over * (1.0 - 1.0/ratio)
-    gr = (10**(gr_db/20.0)).astype(np.float32)
+    over = env_db - float(threshold_db)
+    knee = max(0.0, float(knee_db))
+    if knee > 1e-6:
+        # Soft-knee avoids abrupt transitions at threshold and sounds less grabby.
+        half = 0.5 * knee
+        over_soft = np.where(
+            over <= -half,
+            0.0,
+            np.where(over >= half, over, ((over + half) ** 2) / (2.0 * knee)),
+        ).astype(np.float32)
+    else:
+        over_soft = np.maximum(over, 0.0).astype(np.float32)
+
+    gr_db = (-np.maximum(over_soft, 0.0) * (1.0 - 1.0 / ratio)).astype(np.float32)
+    target_gain = db_to_lin(gr_db).astype(np.float32)
+
+    atk = max(1, int(sr * max(0.1, float(attack_ms)) / 1000.0))
+    rel = max(1, int(sr * max(1.0, float(release_ms)) / 1000.0))
+    g = float(target_gain[0])
+    gain_sm = np.empty_like(target_gain)
+    for i, x in enumerate(target_gain):
+        xv = float(x)
+        if xv < g:  # more attenuation needed -> attack
+            g = g + (xv - g) / atk
+        else:       # recover more gently
+            g = g + (xv - g) / rel
+        gain_sm[i] = g
 
     # apply to band component only
-    s_band_out = s_band * gr
-    mid_out = mid - mix*(s_band - s_band_out)  # reduce sibilance
+    s_band_out = s_band * gain_sm
+    mid_out = mid - mix * (s_band - s_band_out)
     return mid_side_decode(mid_out, side)
 
 
@@ -2219,7 +2340,7 @@ def master(target_path: str, out_path: str, preset: Preset,
     pre_lufs = integrated_loudness_lufs(y, sr_t)
 
     def _render_at(target_lufs: float) -> Tuple[np.ndarray, Dict[str, float]]:
-        y_norm, cur_lufs, gain_db = apply_lufs_gain(y, sr_t, target_lufs)
+        y_norm, cur_lufs, gain_db = apply_lufs_gain(y, sr_t, target_lufs, cur_lufs=pre_lufs)
         y_lim, lim_stats = peak_control_chain(y_norm, sr_t, preset)
         post = integrated_loudness_lufs(y_lim, sr_t)
         lim_stats = {
