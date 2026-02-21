@@ -11,28 +11,50 @@ from __future__ import annotations
 
 from collections import deque
 import json
+import logging
 import mimetypes
 from pathlib import Path
 from typing import Optional
-
+import dotenv
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 
-from .config import settings
-from .jobs import job_manager
-from .schemas import ErrorResponse, JobReportResponse, JobSettings, JobStatusResponse
+try:
+    from .config import settings
+    from .jobs import job_manager
+    from .schemas import ErrorResponse, JobReportResponse, JobSettings, JobStatusResponse
+except ImportError:  # pragma: no cover - supports `uvicorn main:app` from backend/
+    from config import settings
+    from jobs import job_manager
+    from schemas import ErrorResponse, JobReportResponse, JobSettings, JobStatusResponse
 
+
+
+logger = logging.getLogger("auralmind.api")
+
+logger.info(
+    dotenv.load_dotenv(".env")
+)
 app = FastAPI(title="AuralMind Mastering Service", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.ALLOWED_ORIGINS or ["*"],
+    allow_origins=["*"],
+    allow_origin_regex=os.getenv("ALLOWED_ORIGIN_REGEX"),
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
+
+
+@app.on_event("startup")
+async def log_runtime_config() -> None:
+    logger.info("CORS allow_origins=%s", settings.ALLOWED_ORIGINS)
+    if settings.ALLOWED_ORIGIN_REGEX:
+        logger.info("CORS allow_origin_regex=%s", settings.ALLOWED_ORIGIN_REGEX)
 
 
 @app.get("/api/health")
@@ -181,7 +203,9 @@ async def get_logs(job_id: str, lines: int = 50) -> Response:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if not job.log_path.is_file():
-        raise HTTPException(status_code=404, detail="Log file not found")
+        # During early queued/processing states the log file may not exist yet.
+        # Return an empty text response instead of a 404 to avoid noisy client errors.
+        return Response(content="", media_type="text/plain")
     try:
         safe_lines = max(1, min(int(lines), 500))
         with open(job.log_path, "r", encoding="utf-8", errors="ignore") as f:
