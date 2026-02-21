@@ -22,19 +22,15 @@ Processing flow (master bus):
 4. Note-aware mono-sub stabilization.
 5. Match-EQ curve design + linear-phase FIR convolution.
 6. Tone and control stages:
-
-- Dynamic masking EQ (MID-focused)
-- De-esser
-- Harmonic glow
-- Stereo realism + microshift + microdetail
-- Section-aware movement/hook lift
-- Transient sculpt
-
+ - Dynamic masking EQ (MID-focused)
+ - De-esser
+ - Harmonic glow
+ - Stereo realism + microshift + microdetail
+ - Section-aware movement/hook lift
+ - Transient sculpt
 7. Loudness governor loop:
-
-- LUFS target search
-- Soft clip + true-peak limiter
-
+ - LUFS target search
+ - Soft clip + true-peak limiter
 8. Export with optional TPDF dithering and report generation.
 
 ## Optimization Strategy Summary
